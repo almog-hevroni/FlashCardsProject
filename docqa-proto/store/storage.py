@@ -2,7 +2,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
-import json, sqlite3, faiss, numpy as np
+import json, sqlite3, numpy as np
+try:
+    import faiss  # type: ignore
+except Exception as exc:
+    raise ImportError(
+        "FAISS is required but not installed. Install it with 'pip install faiss-cpu' "
+        "on CPU-only environments (or 'faiss-gpu' if you have CUDA)."
+    ) from exc
 
 VEC_DIM = 1536  # OpenAI text-embedding-3-small
 

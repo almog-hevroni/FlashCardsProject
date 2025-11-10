@@ -1,5 +1,10 @@
 from typing import List, TypedDict
-from docx import Document
+try:
+    from docx import Document  # type: ignore
+except Exception as exc:
+    raise ImportError(
+        "python-docx is required but not installed. Install it with 'pip install python-docx'."
+    ) from exc
 
 class Page(TypedDict):
     page: int

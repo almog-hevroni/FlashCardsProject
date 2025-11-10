@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List
-from app.llm import embed_query
-from app.store.storage import VectorStore, StoredChunk
+from llm import embed_query
+from store.storage import VectorStore, StoredChunk
 
 @dataclass
 class Retrieval:

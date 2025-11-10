@@ -1,7 +1,7 @@
 from typing import List
 import numpy as np
 from openai import OpenAI
-from app.utils import getenv
+from utils import getenv
 
 _client = None
 def client() -> OpenAI:

@@ -1,6 +1,6 @@
 import argparse, json
 from app.api import ingest_document, retrieve_with_proofs
-from app.store.storage import VectorStore
+from store.storage import VectorStore
 
 def main():
     p = argparse.ArgumentParser()

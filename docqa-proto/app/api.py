@@ -1,12 +1,12 @@
 import uuid
 from pathlib import Path
 from typing import List
-from app.ingest.pdf_loader import load_pdf
-from app.ingest.docx_loader import load_docx
-from app.ingest.txt_loader import load_txt
-from app.ingest.chunker import make_chunks, Chunk
-from app.llm import embed_texts
-from app.store.storage import VectorStore, StoredChunk
+from ingest.pdf_loader import load_pdf
+from ingest.docx_loader import load_docx
+from ingest.txt_loader import load_txt
+from ingest.chunker import make_chunks, Chunk
+from llm import embed_texts
+from store.storage import VectorStore, StoredChunk
 from app.models import IngestResult, ProofSpan
 
 def _detect_loader(path: str):
