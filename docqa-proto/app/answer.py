@@ -143,12 +143,18 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
             proofs_all = [p for p in proofs_all if p.doc_id in allowed_set]
     if not allowed_set and doc_id:
         allowed_set = {doc_id}
+    proofs_all = sorted(
+        proofs_all,
+        key=lambda p: (p.score if p.score is not None else 0.0),
+        reverse=True,
+    )
     proofs = [p for p in proofs_all if p.score is None or p.score >= min_score]
     if allowed_set:
         proofs = [p for p in proofs if p.doc_id in allowed_set]
     if not proofs:
         fallback_pool = [p for p in proofs_all if not allowed_set or p.doc_id in allowed_set]
-        proofs = fallback_pool[:2]
+        proofs = fallback_pool[: max(4, len(fallback_pool))]
+    proofs = proofs[: max(6, min(len(proofs), k + 2))]
 
     # 2) prepare concise snippets for prompting
     prompt_proofs = _condense_proofs(question, "", proofs)
@@ -161,16 +167,17 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
     sys_prompt = (
         "You are a careful assistant. Answer ONLY using the provided sources.\n"
         "If the answer is not contained in them, say you don't have enough information.\n"
-        "Add an inline citation like [S1, p.3] AFTER every sentence that uses a source.\n"
-        "Prefer precise wording and avoid speculation."
+        "After every sentence that states a fact, add an inline citation like [S1, p.3].\n"
+        "Never cite a source that wasn't provided."
     )
     user_prompt = (
         f"QUESTION:\n{question}\n\n"
         f"SOURCES (S# refers to source order):\n{context}\n\n"
         "RULES:\n"
         "- Only use information found in SOURCES; do not invent.\n"
-        "- Add inline citations [S#, p.#] after each sentence that uses a source.\n"
-        "- If sources conflict or are unclear, say so and cite the conflicting sources.\n"
+        "- Add inline citations [S#, p.#] after each sentence that uses a source (multiple citations allowed).\n"
+        "- If you lack evidence, state that explicitly and cite the relevant source showing the gap.\n"
+        "- Keep the answer concise (2-4 sentences) and focused on the question."
     )
 
     resp = client.chat.completions.create(

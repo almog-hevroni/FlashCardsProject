@@ -244,14 +244,25 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
         "Penalize missing or incorrect citations.\n\n"
         f"QUESTION:\n{question}\n\nANSWER:\n{answer}\n\nSOURCES:\n{src}"
     )
-    resp = _openai().chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[{"role": "system", "content": "You are a strict fact-checker."},
-                  {"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=300,
-    )
-    raw = resp.choices[0].message.content or "{}"
+    try:
+        resp = _openai().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "system", "content": "You are a strict fact-checker."},
+                      {"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=300,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+    except Exception:
+        resp = _openai().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[{"role": "system", "content": "You are a strict fact-checker."},
+                      {"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=300,
+        )
+        raw = resp.choices[0].message.content or "{}"
     try:
         data = json.loads(raw)
     except Exception:
