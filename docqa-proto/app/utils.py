@@ -1,8 +1,12 @@
 import os
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always load the project-level .env so CLI invocations pick up secrets.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=True)
+load_dotenv(override=False)
 
 def getenv(name: str, default: Optional[str] = None) -> str:
     v = os.getenv(name, default)

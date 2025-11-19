@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Sequence, TypedDict
 import json
 import numpy as np
 from langgraph.graph import StateGraph, END
@@ -9,15 +9,18 @@ from app.models import ProofSpan
 
 # ------------- State -------------
 
-class QAItem(TypedDict):
+class QAItem(TypedDict, total=False):
     question: str
     answer: str
     proofs: List[Dict[str, Any]]
     question_score: float
     answer_score: float
+    forced: bool
+    critique: str
 
 class State(TypedDict):
-    doc_id: str
+    doc_ids: List[str]
+    store_basepath: str
     k: int
     min_score: float
     target_n: int
@@ -37,10 +40,19 @@ class State(TypedDict):
 def _openai():
     return client()
 
-def _sample_doc_context(store: VectorStore, doc_id: str, n: int = 20) -> str:
-    chunks = store.sample_chunks_by_doc(doc_id, n=n)
+def _sample_doc_context(store: VectorStore, doc_ids: Sequence[str], n: int = 20) -> str:
+    if not doc_ids:
+        return ""
+    import random
+    pooled = []
+    for doc_id in doc_ids:
+        pooled.extend(store.sample_chunks_by_doc(doc_id, n=n))
+    if not pooled:
+        return ""
+    random.shuffle(pooled)
+    selected = pooled[:n]
     buf = []
-    for c in chunks:
+    for c in selected:
         buf.append(f"Page {c.page}\n{c.text.strip()}\n")
     return "\n\n".join(buf)[:12000]
 
@@ -208,9 +220,18 @@ def _select_questions(questions: List[str], evaluations: List[Dict[str, Any]], t
                 selected.append((q, score))
     return selected[:top_n]
 
-def _answer_with_citations(question: str, k: int, min_score: float, doc_id: str) -> AnswerWithCitations:
+def _answer_with_citations(question: str, k: int, min_score: float, doc_ids: List[str], store_basepath: str) -> AnswerWithCitations:
     from app.answer import generate_answer
-    return generate_answer(question=question, k=k, min_score=min_score, doc_id=doc_id)
+    store = VectorStore(basepath=store_basepath)
+    if len(doc_ids) == 1:
+        return generate_answer(question=question, k=k, min_score=min_score, doc_id=doc_ids[0], store=store)
+    return generate_answer(
+        question=question,
+        k=k,
+        min_score=min_score,
+        allowed_doc_ids=doc_ids,
+        store=store,
+    )
 
 def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dict[str, Any]:
     sources = []
@@ -246,6 +267,13 @@ def _format_report(items: List[QAItem]) -> str:
     for i, it in enumerate(items, 1):
         lines.append(f"Q{i}: {it['question']}\n")
         lines.append(f"Answer:\n{it['answer']}\n")
+        score = it.get("answer_score", 0.0)
+        forced = it.get("forced", False)
+        flag = " (forced accept)" if forced else ""
+        lines.append(f"Answer score: {score:.2f}{flag}")
+        critique = it.get("critique")
+        if critique:
+            lines.append(f"Critique: {critique}")
         lines.append("Proofs:")
         for j, p in enumerate(it["proofs"], 1):
             lines.append(f"- S{j} | doc={p['doc_id']} page={p['page']} score={p['score']:.2f}")
@@ -260,8 +288,8 @@ def _format_report(items: List[QAItem]) -> str:
 # ------------- Nodes -------------
 
 def node_propose_questions(state: State) -> State:
-    store = VectorStore()
-    context = _sample_doc_context(store, state["doc_id"], n=24)
+    store = VectorStore(basepath=state["store_basepath"])
+    context = _sample_doc_context(store, state["doc_ids"], n=24)
     summary = _summarize_context(context)
     candidate_count = max(state["target_n"] * 4, 12)
     raw_qs = _propose_questions_from_context(context, summary, n=candidate_count)
@@ -287,7 +315,13 @@ def node_propose_questions(state: State) -> State:
 def node_answer(state: State) -> State:
     idx = state["current_index"]
     q = state["questions"][idx]
-    ans = _answer_with_citations(q, k=state["k"], min_score=state["min_score"], doc_id=state["doc_id"])
+    ans = _answer_with_citations(
+        q,
+        k=state["k"],
+        min_score=state["min_score"],
+        doc_ids=state["doc_ids"],
+        store_basepath=state["store_basepath"],
+    )
     return {
         **state,
         "working_answer": ans.answer,
@@ -302,16 +336,25 @@ def node_judge(state: State) -> State:
     judge = _validate_answer(q, answer, proofs)
     score = float(judge.get("score", 0.5))
     critique = str(judge.get("critique", ""))
-    accepted = score >= 0.75
+    accepted = score >= 0.7
+    attempts_used = state["attempts"] + 1
+    force_accept = not accepted and attempts_used >= state["max_attempts"]
     qa_list = state["qa"][:]
-    if accepted:
-        qa_list.append({
+    if accepted or force_accept:
+        qa_entry: QAItem = {
             "question": q,
             "answer": answer,
             "proofs": [p.model_dump() for p in proofs],
             "question_score": state["question_scores"][idx] if idx < len(state["question_scores"]) else 0.5,
             "answer_score": score,
-        })
+        }
+        if force_accept:
+            qa_entry["forced"] = True
+            if critique:
+                qa_entry["critique"] = critique
+        elif critique:
+            qa_entry["critique"] = critique
+        qa_list.append(qa_entry)
     return {
         **state,
         "last_critique": critique,
@@ -346,8 +389,8 @@ def node_next_or_finish(state: State) -> State:
             "working_answer": None,
             "working_proofs": None,
             "last_critique": None,
-            "k": 8,
-            "min_score": 0.35,
+            "k": 10,
+            "min_score": 0.4,
         }
     return state
 
@@ -383,12 +426,16 @@ def build_graph():
 
 # ------------- Runner -------------
 
-def run_generate_qa(doc_id: str, num_questions: int = 3) -> Dict[str, Any]:
+def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 3, store_basepath: str = "store") -> Dict[str, Any]:
     graph = build_graph()
+    doc_id_list = [d for d in doc_ids if d]
+    if not doc_id_list:
+        return {"doc_ids": [], "n": 0, "items": [], "report": ""}
     init: State = {
-        "doc_id": doc_id,
-        "k": 8,
-        "min_score": 0.35,
+        "doc_ids": doc_id_list,
+        "store_basepath": store_basepath,
+        "k": 10,
+        "min_score": 0.4,
         "target_n": num_questions,
         "attempts": 0,
         "max_attempts": 3,
@@ -403,24 +450,31 @@ def run_generate_qa(doc_id: str, num_questions: int = 3) -> Dict[str, Any]:
     }
     final_state = graph.invoke(init)
     report = _format_report(final_state["qa"])
-    return {"doc_id": doc_id, "n": len(final_state["qa"]), "items": final_state["qa"], "report": report}
+    return {
+        "doc_ids": doc_id_list,
+        "n": len(final_state["qa"]),
+        "items": final_state["qa"],
+        "report": report,
+    }
 
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--doc_id", help="Existing document id in the store")
+    p.add_argument("--doc_id", nargs="+", help="Existing document id(s) in the store")
     p.add_argument("--path", help="Path to a document to ingest first")
     p.add_argument("--n", type=int, default=3)
     args = p.parse_args()
     store = VectorStore()
     if args.path:
-        from app.api import ingest_document
-        res = ingest_document(args.path, store=store)
-        doc_id = res.doc_id
-        print(f"Ingested doc_id={doc_id}")
+        from app.api import ingest_documents
+        res = ingest_documents([args.path], store=store)[0]
+        doc_ids = [res.doc_id]
+        print(f"Ingested doc_id={doc_ids[0]}")
     else:
-        doc_id = args.doc_id
-    out = run_generate_qa(doc_id=doc_id, num_questions=args.n)
+        if not args.doc_id:
+            raise SystemExit("Either --path or --doc_id must be provided")
+        doc_ids = args.doc_id
+    out = run_generate_qa(doc_ids=doc_ids, num_questions=args.n, store_basepath=str(store.base))
     print("\n=== AUTO-QA REPORT ===\n")
     print(out["report"])
 

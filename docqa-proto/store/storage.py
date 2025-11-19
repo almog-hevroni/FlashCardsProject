@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 import json, sqlite3, numpy as np
 try:
     import faiss  # type: ignore
@@ -10,7 +10,7 @@ except Exception:
     faiss = None  # type: ignore
     _FAISS_AVAILABLE = False
 
-VEC_DIM = 1536  # OpenAI text-embedding-3-small
+VEC_DIM = 3072  # OpenAI text-embedding-3-small
 
 def _normalize_L2(x: np.ndarray) -> None:
     # In-place L2 normalization along rows, similar to faiss.normalize_L2
@@ -79,11 +79,11 @@ class VectorStore:
     def __init__(self, basepath: str = "store"):
         self.base = Path(basepath)
         self.base.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.base / "meta.sqlite"
+        self.db_path = self.base / "meta.sqlite" #sql tables data file
         self.index_path = self.base / "faiss.index"
         self.vectors_path = self.base / "vectors.npy"
 
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path) # Connect to sql
         self._ensure_schema()
 
         if _FAISS_AVAILABLE:
@@ -93,6 +93,7 @@ class VectorStore:
                 self.index = faiss.IndexFlatIP(VEC_DIM)  # type: ignore  # cosine via normalized dot
         else:
             self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
+        self.vector_dimension = VEC_DIM
 
     def _ensure_schema(self):
         cur = self.conn.cursor()
@@ -110,6 +111,11 @@ class VectorStore:
             start INTEGER,
             end INTEGER,
             text TEXT
+        );
+        CREATE TABLE IF NOT EXISTS embedding_cache(
+            hash TEXT PRIMARY KEY,
+            dim INTEGER,
+            vector BLOB
         );
         """)
         self.conn.commit()
@@ -161,6 +167,40 @@ class VectorStore:
             out.append((c, float(score)))
         return out
 
+    # ------ cache helpers ------
+    def get_cached_embeddings(self, hashes: List[str]) -> dict[str, np.ndarray]:
+        if not hashes:
+            return {}
+        placeholders = ",".join("?" for _ in hashes)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"SELECT hash, dim, vector FROM embedding_cache WHERE hash IN ({placeholders})",
+            hashes,
+        )
+        out: dict[str, np.ndarray] = {}
+        for hash_value, dim, blob in cur.fetchall():
+            try:
+                arr = np.frombuffer(blob, dtype="float32")
+                if arr.size != dim:
+                    continue
+                out[hash_value] = arr
+            except Exception:
+                continue
+        return out
+
+    def add_cached_embeddings(self, mapping: dict[str, np.ndarray]) -> None:
+        if not mapping:
+            return
+        rows = []
+        for key, vec in mapping.items():
+            arr = vec.astype("float32", copy=False)
+            rows.append((key, arr.size, arr.tobytes()))
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO embedding_cache(hash, dim, vector) VALUES(?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+
     # ------ doc helpers ------
     def list_chunks_by_doc(self, doc_id: str) -> List[StoredChunk]:
         cur = self.conn.cursor()
@@ -178,4 +218,38 @@ class VectorStore:
         idxs = list(range(len(chunks)))
         random.shuffle(idxs)
         return [chunks[i] for i in idxs[:n]]
+
+    # ------ cache helpers ------
+    def get_cached_embeddings(self, hashes: List[str]) -> Dict[str, np.ndarray]:
+        if not hashes:
+            return {}
+        placeholders = ",".join("?" for _ in hashes)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"SELECT hash, dim, vector FROM embedding_cache WHERE hash IN ({placeholders})",
+            hashes,
+        )
+        cached: Dict[str, np.ndarray] = {}
+        for hash_value, dim, blob in cur.fetchall():
+            try:
+                arr = np.frombuffer(blob, dtype="float32")
+                if arr.size != dim:
+                    continue
+                cached[hash_value] = arr
+            except Exception:
+                continue
+        return cached
+
+    def add_cached_embeddings(self, mapping: Dict[str, np.ndarray]) -> None:
+        if not mapping:
+            return
+        rows = []
+        for key, vec in mapping.items():
+            arr = vec.astype("float32", copy=False)
+            rows.append((key, arr.size, arr.tobytes()))
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO embedding_cache(hash, dim, vector) VALUES(?,?,?)",
+            rows,
+        )
+        self.conn.commit()
 

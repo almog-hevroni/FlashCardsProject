@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Sequence
 import re
 import numpy as np
 from openai import OpenAI
 from app.utils import getenv
 from app.llm import CHAT_MODEL, embed_texts
 from app.api import retrieve_with_proofs, retrieve_with_proofs_for_doc
+from store.storage import VectorStore
 from app.models import ProofSpan
 
 @dataclass
@@ -123,20 +124,31 @@ def _condense_proofs(question: str, answer: str, proofs: List[ProofSpan]) -> Lis
         deduped.append(p)
     return deduped
 
-def generate_answer(question: str, k: int = 5, min_score: float = 0.35,
-                    model: str = CHAT_MODEL, doc_id: str | None = None) -> AnswerWithCitations:
+def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
+                    model: str = CHAT_MODEL, doc_id: str | None = None,
+                    allowed_doc_ids: Sequence[str] | None = None,
+                    store: VectorStore | None = None) -> AnswerWithCitations:
     """
     Retrieve top-k proofs, filter by score, then ask the LLM to answer using only those proofs.
     Returns the final answer text + the proofs used (for UI / logging).
     """
     # 1) retrieve
+    allowed_set = set(allowed_doc_ids or [])
+    store_obj = store or VectorStore()
     if doc_id:
-        proofs_all = retrieve_with_proofs_for_doc(question, doc_id=doc_id, k=k)
+        proofs_all = retrieve_with_proofs_for_doc(question, doc_id=doc_id, k=k, store=store_obj)
     else:
-        proofs_all = retrieve_with_proofs(question, k=k)
+        proofs_all = retrieve_with_proofs(question, k=k, store=store_obj)
+        if allowed_set:
+            proofs_all = [p for p in proofs_all if p.doc_id in allowed_set]
+    if not allowed_set and doc_id:
+        allowed_set = {doc_id}
     proofs = [p for p in proofs_all if p.score is None or p.score >= min_score]
+    if allowed_set:
+        proofs = [p for p in proofs if p.doc_id in allowed_set]
     if not proofs:
-        proofs = proofs_all[:2]  # fall back to something
+        fallback_pool = [p for p in proofs_all if not allowed_set or p.doc_id in allowed_set]
+        proofs = fallback_pool[:2]
 
     # 2) prepare concise snippets for prompting
     prompt_proofs = _condense_proofs(question, "", proofs)

@@ -1,25 +1,38 @@
-import argparse, json
+import argparse, json, logging
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.api import ingest_document, retrieve_with_proofs
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+)
+
+from app.api import ingest_documents, retrieve_with_proofs
 from store.storage import VectorStore
 from app.answer import generate_answer
+from app.graph import run_generate_qa
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--ingest", help="path to document to ingest")
+    p.add_argument("--ingest", nargs="+", help="one or more document paths to ingest")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
-    p.add_argument("--k", type=int, default=5)
-    p.add_argument("--min_score", type=float, default=0.5)
+    p.add_argument("--qa_n", type=int, default=3, help="number of auto-generated QA pairs after ingest")
+    p.add_argument("--k", type=int, default=8)
+    p.add_argument("--min_score", type=float, default=0.4)
     args = p.parse_args()
 
     store = VectorStore()
 
     if args.ingest:
-        res = ingest_document(args.ingest, store)
-        print(f"Ingested doc_id={res.doc_id} chunks={res.num_chunks}")
+        results = ingest_documents(args.ingest, store)
+        for res in results:
+            print(f"Ingested doc_id={res.doc_id} chunks={res.num_chunks}")
+        doc_ids = [res.doc_id for res in results]
+        if doc_ids and args.qa_n > 0:
+            qa_out = run_generate_qa(doc_ids=doc_ids, num_questions=args.qa_n, store_basepath=str(store.base))
+            print("\n=== AUTO-GENERATED QA ===\n")
+            print(qa_out["report"])
 
     if args.ask:
         proofs = retrieve_with_proofs(args.ask, k=args.k, store=store)
