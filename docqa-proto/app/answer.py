@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Sequence, Optional
+import json
 import re
 import numpy as np
 from openai import OpenAI
@@ -13,6 +14,14 @@ from app.models import ProofSpan
 class AnswerWithCitations:
     answer: str
     proofs: List[ProofSpan]
+    score: Optional[float] = None
+    critique: Optional[str] = None
+
+@dataclass
+class CondenseArtifacts:
+    sentences_by_proof: List[List[str]]
+    sentence_meta: List[tuple[int, int]]
+    sentence_vectors: np.ndarray
 
 def _build_context(proofs: List[ProofSpan], max_chars: int = 10000) -> str:
     """
@@ -110,29 +119,69 @@ def _condense_proof_text(
         end=proof.end, text=condensed, score=proof.score
     )
 
-def _condense_proofs(question: str, answer: str, proofs: List[ProofSpan]) -> List[ProofSpan]:
+def _condense_proofs(
+    question: str,
+    answer: str,
+    proofs: List[ProofSpan],
+    *,
+    artifacts: Optional[CondenseArtifacts] = None,
+) -> tuple[List[ProofSpan], Optional[CondenseArtifacts]]:
     if not proofs:
-        return []
-    sentences_by_proof: List[List[str]] = []
-    flat_sentences: List[tuple[int, int, str]] = []
-    for proof_idx, proof in enumerate(proofs):
-        cleaned = _clean_text(proof.text or "")
-        sentences = _split_sentences(cleaned) if cleaned else []
-        sentences_by_proof.append(sentences)
-        for sent_idx, sentence in enumerate(sentences):
-            if sentence:
-                flat_sentences.append((proof_idx, sent_idx, sentence))
+        return [], artifacts
+    use_artifacts = (
+        artifacts is not None
+        and len(artifacts.sentences_by_proof) == len(proofs)
+        and len(artifacts.sentence_meta) == len(artifacts.sentence_vectors)
+    )
+    if use_artifacts:
+        sentences_by_proof = artifacts.sentences_by_proof
+        flat_sentences: List[tuple[int, int, str]] = []
+        for (proof_idx, sent_idx) in artifacts.sentence_meta:
+            if (
+                0 <= proof_idx < len(sentences_by_proof)
+                and 0 <= sent_idx < len(sentences_by_proof[proof_idx])
+            ):
+                flat_sentences.append(
+                    (proof_idx, sent_idx, sentences_by_proof[proof_idx][sent_idx])
+                )
+        sent_vecs = artifacts.sentence_vectors
+        artifact_out = artifacts
+    else:
+        sentences_by_proof = []
+        flat_sentences = []
+        for proof_idx, proof in enumerate(proofs):
+            cleaned = _clean_text(proof.text or "")
+            sentences = _split_sentences(cleaned) if cleaned else []
+            sentences_by_proof.append(sentences)
+            for sent_idx, sentence in enumerate(sentences):
+                if sentence:
+                    flat_sentences.append((proof_idx, sent_idx, sentence))
+        if flat_sentences:
+            try:
+                sent_vecs = embed_texts([entry[2] for entry in flat_sentences])
+                sent_norms = np.linalg.norm(sent_vecs, axis=1, keepdims=True)
+                sent_vecs = sent_vecs / np.clip(sent_norms, 1e-12, None)
+            except Exception:
+                sent_vecs = np.zeros((0, 1), dtype="float32")
+        else:
+            sent_vecs = np.zeros((0, 1), dtype="float32")
+        artifact_out = (
+            CondenseArtifacts(
+                sentences_by_proof=sentences_by_proof,
+                sentence_meta=[(proof_idx, sent_idx) for proof_idx, sent_idx, _ in flat_sentences],
+                sentence_vectors=sent_vecs,
+            )
+            if flat_sentences and sent_vecs.size
+            else None
+        )
     ranked_map: dict[int, List[tuple[int, float]]] = {}
-    if flat_sentences:
+    if flat_sentences and sent_vecs.size:
         try:
             query = f"{question}\n{answer}".strip() or question
             qa_vec = embed_texts([query])[0]
             qa_norm = np.linalg.norm(qa_vec)
             if qa_norm > 0:
                 qa_vec = qa_vec / qa_norm
-            sent_vecs = embed_texts([entry[2] for entry in flat_sentences])
-            sent_norms = np.linalg.norm(sent_vecs, axis=1, keepdims=True)
-            sent_vecs = sent_vecs / np.clip(sent_norms, 1e-12, None)
             sims = (sent_vecs @ qa_vec).tolist()
             for (proof_idx, sent_idx, _), score in zip(flat_sentences, sims):
                 ranked_map.setdefault(proof_idx, []).append((sent_idx, score))
@@ -161,7 +210,7 @@ def _condense_proofs(question: str, answer: str, proofs: List[ProofSpan]) -> Lis
             continue
         seen.add(key)
         deduped.append(p)
-    return deduped
+    return deduped, artifact_out
 
 def _select_display_proofs(
     question: str,
@@ -250,7 +299,7 @@ def generate_answer(
     proofs = proofs[: max(6, min(len(proofs), k + 2))]
 
     # 2) prepare concise snippets for prompting
-    prompt_proofs = _condense_proofs(question, "", proofs)
+    prompt_proofs, proof_artifacts = _condense_proofs(question, "", proofs)
 
     # 3) context
     context = _build_context(prompt_proofs)
@@ -262,7 +311,9 @@ def generate_answer(
         "Answer ONLY using the provided sources.\n"
         "If the answer is not contained in them, say you don't have enough information.\n"
         "Do NOT include inline citations or source identifiers in the answer; evidence is handled separately.\n"
-        "Never cite a source that wasn't provided."
+        "Never cite a source that wasn't provided.\n"
+        "Respond as JSON with keys: answer (string), score (0-1 float), critique (string). "
+        "Use the critique to note any coverage gaps or uncertainties."
     )
     user_prompt = (
         f"QUESTION:\n{question}\n\n"
@@ -271,7 +322,8 @@ def generate_answer(
         "- Only use information found in SOURCES; do not invent.\n"
         "- Do not include citations, source identifiers, or brackets like [S1, p.3] in the answer text.\n"
         "- If you lack evidence, state that explicitly and mention that the sources do not cover it.\n"
-        "- Flashcard style: respond in 1–2 short sentences totaling ≤35 words while staying precise."
+        "- Flashcard style: respond in 1–2 short sentences totaling ≤35 words while staying precise.\n"
+        "- Output valid JSON only."
     )
 
     resp = client.chat.completions.create(
@@ -282,11 +334,30 @@ def generate_answer(
         ],
         temperature=0.2,
         max_tokens=600,
+        response_format={"type": "json_object"},
     )
-    answer_text = resp.choices[0].message.content.strip()
+    raw = resp.choices[0].message.content or ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {"answer": raw}
+    answer_text = str(payload.get("answer", "")).strip() or raw.strip()
+    raw_score = payload.get("score")
+    try:
+        score_val = float(raw_score) if raw_score is not None else None
+    except Exception:
+        score_val = None
+    critique = str(payload.get("critique", "")).strip()
 
-    final_proofs = _condense_proofs(question, answer_text, proofs)
+    final_proofs, _ = _condense_proofs(
+        question, answer_text, proofs, artifacts=proof_artifacts
+    )
     display_proofs = _select_display_proofs(question, answer_text, final_proofs)
 
     # 4) return both the answer and the proof objects for UI
-    return AnswerWithCitations(answer=answer_text, proofs=display_proofs)
+    return AnswerWithCitations(
+        answer=answer_text,
+        proofs=display_proofs,
+        score=score_val,
+        critique=critique or None,
+    )

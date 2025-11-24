@@ -35,6 +35,8 @@ class State(TypedDict):
     qa: List[QAItem]
     working_answer: Optional[str]
     working_proofs: Optional[List[ProofSpan]]
+    working_score: Optional[float]
+    working_answer_critique: Optional[str]
     last_critique: Optional[str]
     summary: str
     retrieval_cache: Dict[int, Dict[str, Any]]
@@ -495,6 +497,8 @@ def node_answer(state: State) -> State:
         **state,
         "working_answer": ans.answer,
         "working_proofs": ans.proofs,
+        "working_score": ans.score,
+        "working_answer_critique": ans.critique,
         "retrieval_cache": retrieval_cache,
     }
 
@@ -503,9 +507,12 @@ def node_judge(state: State) -> State:
     q = state["questions"][idx]
     answer = state["working_answer"] or ""
     proofs = state["working_proofs"] or []
-    judge = _validate_answer(q, answer, proofs)
-    score = float(judge.get("score", 0.5))
-    critique = str(judge.get("critique", ""))
+    score = state.get("working_score")
+    critique = state.get("working_answer_critique") or ""
+    if score is None:
+        judge = _validate_answer(q, answer, proofs)
+        score = float(judge.get("score", 0.5))
+        critique = str(judge.get("critique", ""))
     accepted = score >= 0.7
     attempts_used = state["attempts"] + 1
     force_accept = not accepted and attempts_used >= state["max_attempts"]
@@ -558,6 +565,8 @@ def node_next_or_finish(state: State) -> State:
             "attempts": 0,
             "working_answer": None,
             "working_proofs": None,
+            "working_score": None,
+            "working_answer_critique": None,
             "last_critique": None,
             "k": 10,
             "min_score": 0.4,
@@ -568,6 +577,8 @@ def node_next_or_finish(state: State) -> State:
         "attempts": 0,
         "working_answer": None,
         "working_proofs": None,
+        "working_score": None,
+        "working_answer_critique": None,
         "last_critique": None,
         "k": 10,
         "min_score": 0.4,
@@ -626,6 +637,8 @@ def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 5, store_basepa
         "qa": [],
         "working_answer": None,
         "working_proofs": None,
+        "working_score": None,
+        "working_answer_critique": None,
         "last_critique": None,
         "summary": "",
         "retrieval_cache": {},
