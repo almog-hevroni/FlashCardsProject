@@ -89,8 +89,6 @@ def make_chunks(doc_id: str, pages: List[Dict[str, Any]],
                 })
                 # overlap: rewind some chars
                 cursor = max(0, end - overlap)
-                # re-seed next window from text slice after overlap
-                remainder = text[cursor:end]  # unused, just conceptual
                 buf, buf_len = [], 0
 
             # start next with current para (if not the dummy "")

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 import re
 import numpy as np
 from openai import OpenAI
@@ -12,11 +12,7 @@ from app.models import ProofSpan
 @dataclass
 class AnswerWithCitations:
     answer: str
-    proofs: List[ProofSpan]  # already includes page/start/end/text/score
-
-def _format_citation(i: int, p: ProofSpan) -> str:
-    # Simple inline citation format: [S{i}, p.{page}]
-    return f"[S{i}, p.{p.page}]"
+    proofs: List[ProofSpan]
 
 def _build_context(proofs: List[ProofSpan], max_chars: int = 10000) -> str:
     """
@@ -41,44 +37,46 @@ def _clean_text(text: str) -> str:
 def _split_sentences(text: str) -> List[str]:
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
 
-def _condense_proof_text(question: str, answer: str, proof: ProofSpan,
-                         max_sentences: int = 2, max_chars: int = 550,
-                         min_similarity: float = 0.1) -> ProofSpan:
+def _condense_proof_text(
+    question: str,
+    answer: str,
+    proof: ProofSpan,
+    max_sentences: int = 2,
+    max_chars: int = 550,
+    min_similarity: float = 0.1,
+    ranked_sentences: Optional[List[tuple[int, float]]] = None,
+    pretokenized_sentences: Optional[List[str]] = None,
+) -> ProofSpan:
     original = _clean_text(proof.text or "")
     if not original:
         return proof
-    sentences = _split_sentences(original)
+    sentences = pretokenized_sentences or _split_sentences(original)
     if not sentences:
         return ProofSpan(
-            doc_id=proof.doc_id, page=proof.page, start=proof.start,
-            end=proof.end, text=original, score=proof.score
+            doc_id=proof.doc_id,
+            page=proof.page,
+            start=proof.start,
+            end=proof.end,
+            text=original,
+            score=proof.score,
         )
-    try:
-        query = f"{question}\n{answer}".strip() or question
-        qa_vec = embed_texts([query])[0]
-        sent_vecs = embed_texts(sentences)
-        qa_norm = np.linalg.norm(qa_vec)
-        if qa_norm > 0:
-            qa_vec = qa_vec / qa_norm
-        sent_norms = np.linalg.norm(sent_vecs, axis=1, keepdims=True)
-        sent_vecs = sent_vecs / np.clip(sent_norms, 1e-12, None)
-        sims = sent_vecs @ qa_vec
-        order = np.argsort(-sims)
-        selected_idx: List[int] = []
-        for idx in order.tolist():
-            if sims[idx] < min_similarity:
+    selected_idx: List[int] = []
+    if ranked_sentences:
+        for idx, score in ranked_sentences:
+            if score < min_similarity and selected_idx:
                 break
             selected_idx.append(idx)
             if len(selected_idx) >= max_sentences:
                 break
-        if not selected_idx:
-            selected_idx = order[:max_sentences].tolist()
-        selected_idx = sorted(set(selected_idx))
-        selected = [sentences[i] for i in selected_idx]
-    except Exception:
-        selected = sentences[:max_sentences]
-    if not selected:
-        selected = sentences[:max_sentences]
+    if not selected_idx:
+        if ranked_sentences:
+            selected_idx = [idx for idx, _ in ranked_sentences[:max_sentences]]
+        else:
+            selected_idx = list(range(min(len(sentences), max_sentences)))
+    selected_idx = sorted(set(idx for idx in selected_idx if 0 <= idx < len(sentences)))
+    if not selected_idx:
+        selected_idx = list(range(min(len(sentences), max_sentences)))
+    selected = [sentences[i] for i in selected_idx]
     filtered: List[str] = []
     for sent in selected:
         sentence = _clean_text(sent)
@@ -113,7 +111,48 @@ def _condense_proof_text(question: str, answer: str, proof: ProofSpan,
     )
 
 def _condense_proofs(question: str, answer: str, proofs: List[ProofSpan]) -> List[ProofSpan]:
-    condensed = [_condense_proof_text(question, answer, p) for p in proofs]
+    if not proofs:
+        return []
+    sentences_by_proof: List[List[str]] = []
+    flat_sentences: List[tuple[int, int, str]] = []
+    for proof_idx, proof in enumerate(proofs):
+        cleaned = _clean_text(proof.text or "")
+        sentences = _split_sentences(cleaned) if cleaned else []
+        sentences_by_proof.append(sentences)
+        for sent_idx, sentence in enumerate(sentences):
+            if sentence:
+                flat_sentences.append((proof_idx, sent_idx, sentence))
+    ranked_map: dict[int, List[tuple[int, float]]] = {}
+    if flat_sentences:
+        try:
+            query = f"{question}\n{answer}".strip() or question
+            qa_vec = embed_texts([query])[0]
+            qa_norm = np.linalg.norm(qa_vec)
+            if qa_norm > 0:
+                qa_vec = qa_vec / qa_norm
+            sent_vecs = embed_texts([entry[2] for entry in flat_sentences])
+            sent_norms = np.linalg.norm(sent_vecs, axis=1, keepdims=True)
+            sent_vecs = sent_vecs / np.clip(sent_norms, 1e-12, None)
+            sims = (sent_vecs @ qa_vec).tolist()
+            for (proof_idx, sent_idx, _), score in zip(flat_sentences, sims):
+                ranked_map.setdefault(proof_idx, []).append((sent_idx, score))
+            for proof_idx in ranked_map:
+                ranked_map[proof_idx].sort(key=lambda x: x[1], reverse=True)
+        except Exception:
+            ranked_map = {}
+    condensed = []
+    for proof_idx, proof in enumerate(proofs):
+        ranked = ranked_map.get(proof_idx)
+        sentences = sentences_by_proof[proof_idx]
+        condensed.append(
+            _condense_proof_text(
+                question,
+                answer,
+                proof,
+                ranked_sentences=ranked,
+                pretokenized_sentences=sentences,
+            )
+        )
     deduped: List[ProofSpan] = []
     seen = set()
     for p in condensed:
@@ -124,10 +163,58 @@ def _condense_proofs(question: str, answer: str, proofs: List[ProofSpan]) -> Lis
         deduped.append(p)
     return deduped
 
-def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
-                    model: str = CHAT_MODEL, doc_id: str | None = None,
-                    allowed_doc_ids: Sequence[str] | None = None,
-                    store: VectorStore | None = None) -> AnswerWithCitations:
+def _select_display_proofs(
+    question: str,
+    answer: str,
+    proofs: List[ProofSpan],
+    max_items: int = 3,
+) -> List[ProofSpan]:
+    """
+    Rank condensed proofs and keep only the most relevant snippets for presentation.
+    """
+    if not proofs or len(proofs) <= max_items:
+        return proofs
+    entries: List[tuple[ProofSpan, str]] = []
+    for proof in proofs:
+        cleaned = _clean_text(proof.text or "")
+        if cleaned:
+            entries.append((proof, cleaned))
+    if not entries:
+        return proofs[:max_items]
+    try:
+        key = (answer or question).strip() or question
+        key_vec = embed_texts([key])[0]
+        key_norm = np.linalg.norm(key_vec)
+        if key_norm > 0:
+            key_vec = key_vec / key_norm
+        text_vecs = embed_texts([text for _, text in entries])
+        text_norms = np.linalg.norm(text_vecs, axis=1, keepdims=True)
+        text_vecs = text_vecs / np.clip(text_norms, 1e-12, None)
+        sims = (text_vecs @ key_vec).tolist()
+    except Exception:
+        sims = [0.0] * len(entries)
+    scored: List[tuple[float, int, ProofSpan]] = []
+    for idx, ((proof, _), sim) in enumerate(zip(entries, sims)):
+        base_score = proof.score if proof.score is not None else 0.0
+        base_score = max(min(base_score, 1.0), -1.0)
+        combined = 0.85 * sim + 0.15 * base_score
+        scored.append((combined, idx, proof))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = [proof for _, _, proof in scored[:max_items]]
+    return top or proofs[:max_items]
+
+def generate_answer(
+    question: str,
+    k: int = 8,
+    min_score: float = 0.4,
+    model: str = CHAT_MODEL,
+    doc_id: str | None = None,
+    allowed_doc_ids: Sequence[str] | None = None,
+    store: VectorStore | None = None,
+    *,
+    prefetched_pool: Sequence[ProofSpan] | None = None,
+    pool_k: int | None = None,
+) -> AnswerWithCitations:
     """
     Retrieve top-k proofs, filter by score, then ask the LLM to answer using only those proofs.
     Returns the final answer text + the proofs used (for UI / logging).
@@ -135,12 +222,18 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
     # 1) retrieve
     allowed_set = set(allowed_doc_ids or [])
     store_obj = store or VectorStore()
-    if doc_id:
-        proofs_all = retrieve_with_proofs_for_doc(question, doc_id=doc_id, k=k, store=store_obj)
-    else:
-        proofs_all = retrieve_with_proofs(question, k=k, store=store_obj)
-        if allowed_set:
-            proofs_all = [p for p in proofs_all if p.doc_id in allowed_set]
+    target_pool = max(pool_k or k, k)
+    if prefetched_pool is not None:
+        proofs_all = list(prefetched_pool)
+        if len(proofs_all) < target_pool:
+            prefetched_pool = None  # force fresh retrieval below
+    if prefetched_pool is None:
+        if doc_id:
+            proofs_all = retrieve_with_proofs_for_doc(question, doc_id=doc_id, k=target_pool, store=store_obj)
+        else:
+            proofs_all = retrieve_with_proofs(question, k=target_pool, store=store_obj)
+            if allowed_set:
+                proofs_all = [p for p in proofs_all if p.doc_id in allowed_set]
     if not allowed_set and doc_id:
         allowed_set = {doc_id}
     proofs_all = sorted(
@@ -165,9 +258,10 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
     # 3) ask the model, but force ground-truth behavior
     client = OpenAI(api_key=getenv("OPENAI_API_KEY"))
     sys_prompt = (
-        "You are a careful assistant. Answer ONLY using the provided sources.\n"
+        "You are a careful assistant that writes flashcard-friendly answers.\n"
+        "Answer ONLY using the provided sources.\n"
         "If the answer is not contained in them, say you don't have enough information.\n"
-        "After every sentence that states a fact, add an inline citation like [S1, p.3].\n"
+        "Do NOT include inline citations or source identifiers in the answer; evidence is handled separately.\n"
         "Never cite a source that wasn't provided."
     )
     user_prompt = (
@@ -175,9 +269,9 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
         f"SOURCES (S# refers to source order):\n{context}\n\n"
         "RULES:\n"
         "- Only use information found in SOURCES; do not invent.\n"
-        "- Add inline citations [S#, p.#] after each sentence that uses a source (multiple citations allowed).\n"
-        "- If you lack evidence, state that explicitly and cite the relevant source showing the gap.\n"
-        "- Keep the answer concise (2-4 sentences) and focused on the question."
+        "- Do not include citations, source identifiers, or brackets like [S1, p.3] in the answer text.\n"
+        "- If you lack evidence, state that explicitly and mention that the sources do not cover it.\n"
+        "- Flashcard style: respond in 1–2 short sentences totaling ≤35 words while staying precise."
     )
 
     resp = client.chat.completions.create(
@@ -192,6 +286,7 @@ def generate_answer(question: str, k: int = 8, min_score: float = 0.4,
     answer_text = resp.choices[0].message.content.strip()
 
     final_proofs = _condense_proofs(question, answer_text, proofs)
+    display_proofs = _select_display_proofs(question, answer_text, final_proofs)
 
     # 4) return both the answer and the proof objects for UI
-    return AnswerWithCitations(answer=answer_text, proofs=final_proofs)
+    return AnswerWithCitations(answer=answer_text, proofs=display_proofs)

@@ -1,11 +1,14 @@
 from typing import Any, Dict, List, Optional, Sequence, TypedDict
+import hashlib
 import json
 import numpy as np
 from langgraph.graph import StateGraph, END
+from app.cache import DocContextSummaryCache
 from app.llm import client, CHAT_MODEL, embed_texts
 from app.answer import AnswerWithCitations
 from store.storage import VectorStore
 from app.models import ProofSpan
+from app.api import retrieve_with_proofs
 
 # ------------- State -------------
 
@@ -34,27 +37,102 @@ class State(TypedDict):
     working_proofs: Optional[List[ProofSpan]]
     last_critique: Optional[str]
     summary: str
+    retrieval_cache: Dict[int, Dict[str, Any]]
 
 # ------------- Helpers -------------
 
 def _openai():
     return client()
 
-def _sample_doc_context(store: VectorStore, doc_ids: Sequence[str], n: int = 20) -> str:
+def _sample_doc_context(
+    store: VectorStore,
+    doc_ids: Sequence[str],
+    n: int = 20,
+    seed: Optional[int] = None,
+) -> str:
     if not doc_ids:
         return ""
     import random
+    rng = random.Random(seed) if seed is not None else random
     pooled = []
     for doc_id in doc_ids:
         pooled.extend(store.sample_chunks_by_doc(doc_id, n=n))
     if not pooled:
         return ""
-    random.shuffle(pooled)
+    rng.shuffle(pooled)
     selected = pooled[:n]
     buf = []
     for c in selected:
         buf.append(f"Page {c.page}\n{c.text.strip()}\n")
     return "\n\n".join(buf)[:12000]
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _embed_with_store_cache(texts: List[str], store: VectorStore) -> np.ndarray:
+    if not texts:
+        return np.zeros((0, store.vector_dimension), dtype="float32")
+    hashes = [_hash_text(t) for t in texts]
+    cached = store.get_cached_embeddings(hashes)
+    missing_idx = [i for i, h in enumerate(hashes) if h not in cached]
+    if missing_idx:
+        missing_texts = [texts[i] for i in missing_idx]
+        new_vectors = embed_texts(missing_texts)
+        for idx, vec in zip(missing_idx, new_vectors):
+            cached[hashes[idx]] = vec.astype("float32", copy=False)
+        store.add_cached_embeddings({hashes[idx]: cached[hashes[idx]] for idx in missing_idx})
+    vectors = np.stack([cached[h] for h in hashes]).astype("float32", copy=False)
+    return vectors
+
+
+def _get_context_and_summary(store: VectorStore, doc_ids: Sequence[str], basepath: str) -> tuple[str, str]:
+    cache = DocContextSummaryCache(basepath)
+    contexts: List[str] = []
+    summaries: List[str] = []
+    for doc_id in doc_ids:
+        cached = cache.get(doc_id)
+        if cached:
+            context = cached.get("context", "")
+            summary = cached.get("summary", "")
+        else:
+            seed = int(_hash_text(doc_id), 16) % (2**32)
+            context = _sample_doc_context(store, [doc_id], n=24, seed=seed)
+            summary = _summarize_context(context)
+            cache.set(doc_id, context, summary)
+        if context:
+            contexts.append(context)
+        if summary:
+            summaries.append(summary)
+    combined_context = "\n\n".join(contexts)[:12000]
+    combined_summary = "\n\n".join(summaries) or "Summary unavailable"
+    return combined_context, combined_summary
+
+
+def _get_or_build_retrieval_pool(
+    question: str,
+    doc_ids: Sequence[str],
+    store: VectorStore,
+    desired_pool: int,
+    cache_entry: Optional[Dict[str, Any]],
+) -> tuple[List[ProofSpan], Dict[str, Any]]:
+    allowed = set(doc_ids or [])
+    cached_pool: Optional[List[ProofSpan]] = None
+    if cache_entry:
+        pool = cache_entry.get("pool")
+        pool_size = cache_entry.get("pool_size", len(pool) if isinstance(pool, list) else 0)
+        if isinstance(pool, list) and pool_size >= desired_pool:
+            cached_pool = pool
+    if cached_pool is not None:
+        return cached_pool, dict(cache_entry or {"pool": cached_pool, "pool_size": desired_pool})
+
+    hits = retrieve_with_proofs(question, k=desired_pool, store=store)
+    if allowed:
+        hits = [h for h in hits if h.doc_id in allowed]
+    new_entry = {"pool": hits, "pool_size": desired_pool}
+    return hits, new_entry
+
 
 def _summarize_context(context: str) -> str:
     prompt = (
@@ -103,11 +181,18 @@ def _propose_questions_from_context(context: str, summary: str, n: int = 6) -> L
         qs = qs[:n]
     return qs
 
-def _dedupe_questions(questions: List[str], threshold: float = 0.85) -> List[str]:
+def _dedupe_questions(
+    questions: List[str],
+    threshold: float = 0.85,
+    store: Optional[VectorStore] = None,
+) -> List[str]:
     if len(questions) <= 1:
         return questions
     try:
-        vecs = embed_texts(questions)
+        if store:
+            vecs = _embed_with_store_cache(questions, store)
+        else:
+            vecs = embed_texts(questions)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         vecs = vecs / np.clip(norms, 1e-12, None)
         kept: List[str] = []
@@ -133,6 +218,42 @@ def _dedupe_questions(questions: List[str], threshold: float = 0.85) -> List[str
             seen.add(key)
             unique.append(q)
         return unique
+
+def _build_question_pool(
+    raw_questions: List[str],
+    target_count: int,
+    store: Optional[VectorStore] = None,
+) -> List[str]:
+    """
+    Ensure we have at least target_count question candidates.
+    Start with aggressive deduplication and gradually relax if we fall short.
+    """
+    cleaned = [q.strip() for q in raw_questions if q.strip()]
+    if target_count <= 0:
+        return []
+    if not cleaned:
+        return []
+    thresholds = [0.85, 0.9, 0.93, 0.97, 0.99]
+    for thresh in thresholds:
+        deduped = _dedupe_questions(cleaned, threshold=thresh, store=store)
+        if len(deduped) >= target_count:
+            return deduped
+    deduped = _dedupe_questions(cleaned, threshold=0.99, store=store)
+    seen_lower = {q.lower() for q in deduped}
+    for q in cleaned:
+        if len(deduped) >= target_count:
+            break
+        key = q.lower()
+        if key in seen_lower:
+            continue
+        deduped.append(q)
+        seen_lower.add(key)
+    if len(deduped) < target_count:
+        idx = 0
+        while len(deduped) < target_count:
+            deduped.append(cleaned[idx % len(cleaned)])
+            idx += 1
+    return deduped[:max(target_count, len(deduped))]
 
 def _score_questions(context: str, summary: str, questions: List[str]) -> List[Dict[str, Any]]:
     if not questions:
@@ -220,17 +341,38 @@ def _select_questions(questions: List[str], evaluations: List[Dict[str, Any]], t
                 selected.append((q, score))
     return selected[:top_n]
 
-def _answer_with_citations(question: str, k: int, min_score: float, doc_ids: List[str], store_basepath: str) -> AnswerWithCitations:
+def _answer_with_citations(
+    question: str,
+    k: int,
+    min_score: float,
+    doc_ids: List[str],
+    store_basepath: str,
+    prefetched_pool: Optional[List[ProofSpan]] = None,
+    pool_k: Optional[int] = None,
+    store: Optional[VectorStore] = None,
+) -> AnswerWithCitations:
     from app.answer import generate_answer
-    store = VectorStore(basepath=store_basepath)
+    store = store or VectorStore(basepath=store_basepath)
+    extra_kwargs = {
+        "prefetched_pool": prefetched_pool,
+        "pool_k": pool_k,
+    }
     if len(doc_ids) == 1:
-        return generate_answer(question=question, k=k, min_score=min_score, doc_id=doc_ids[0], store=store)
+        return generate_answer(
+            question=question,
+            k=k,
+            min_score=min_score,
+            doc_id=doc_ids[0],
+            store=store,
+            **extra_kwargs,
+        )
     return generate_answer(
         question=question,
         k=k,
         min_score=min_score,
         allowed_doc_ids=doc_ids,
         store=store,
+        **extra_kwargs,
     )
 
 def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dict[str, Any]:
@@ -300,11 +442,10 @@ def _format_report(items: List[QAItem]) -> str:
 
 def node_propose_questions(state: State) -> State:
     store = VectorStore(basepath=state["store_basepath"])
-    context = _sample_doc_context(store, state["doc_ids"], n=24)
-    summary = _summarize_context(context)
+    context, summary = _get_context_and_summary(store, state["doc_ids"], state["store_basepath"])
     candidate_count = max(state["target_n"] * 4, 12)
     raw_qs = _propose_questions_from_context(context, summary, n=candidate_count)
-    deduped = _dedupe_questions(raw_qs)
+    deduped = _build_question_pool(raw_qs, state["target_n"], store=store)
     evaluations = _score_questions(context, summary, deduped)
     selected = _select_questions(deduped, evaluations, top_n=state["target_n"])
     questions = [q for q, _ in selected]
@@ -326,17 +467,33 @@ def node_propose_questions(state: State) -> State:
 def node_answer(state: State) -> State:
     idx = state["current_index"]
     q = state["questions"][idx]
+    store = VectorStore(basepath=state["store_basepath"])
+    retrieval_cache = state.get("retrieval_cache", {})
+    cache_entry = retrieval_cache.get(idx)
+    desired_pool = max(state["k"] + 6, 16)
+    pool, updated_entry = _get_or_build_retrieval_pool(
+        q,
+        state["doc_ids"],
+        store,
+        desired_pool,
+        cache_entry,
+    )
     ans = _answer_with_citations(
         q,
         k=state["k"],
         min_score=state["min_score"],
         doc_ids=state["doc_ids"],
         store_basepath=state["store_basepath"],
+        prefetched_pool=pool,
+        pool_k=desired_pool,
+        store=store,
     )
+    retrieval_cache[idx] = updated_entry
     return {
         **state,
         "working_answer": ans.answer,
         "working_proofs": ans.proofs,
+        "retrieval_cache": retrieval_cache,
     }
 
 def node_judge(state: State) -> State:
@@ -403,7 +560,16 @@ def node_next_or_finish(state: State) -> State:
             "k": 10,
             "min_score": 0.4,
         }
-    return state
+    return {
+        **state,
+        "current_index": len(state["questions"]),
+        "attempts": 0,
+        "working_answer": None,
+        "working_proofs": None,
+        "last_critique": None,
+        "k": 10,
+        "min_score": 0.4,
+    }
 
 # ------------- Build graph -------------
 
@@ -425,7 +591,9 @@ def build_graph():
     g.add_edge("strengthen", "answer")
 
     def done_or_continue(state: State) -> str:
-        if len(state["qa"]) >= state["target_n"] or state["current_index"] + 1 >= len(state["questions"]):
+        if len(state["qa"]) >= state["target_n"]:
+            return END
+        if state["current_index"] >= len(state["questions"]):
             return END
         return "answer"
 
@@ -437,7 +605,7 @@ def build_graph():
 
 # ------------- Runner -------------
 
-def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 3, store_basepath: str = "store") -> Dict[str, Any]:
+def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 5, store_basepath: str = "store") -> Dict[str, Any]:
     graph = build_graph()
     doc_id_list = [d for d in doc_ids if d]
     if not doc_id_list:
@@ -458,6 +626,7 @@ def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 3, store_basepa
         "working_proofs": None,
         "last_critique": None,
         "summary": "",
+        "retrieval_cache": {},
     }
     final_state = graph.invoke(init)
     report = _format_report(final_state["qa"])
@@ -473,7 +642,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--doc_id", nargs="+", help="Existing document id(s) in the store")
     p.add_argument("--path", help="Path to a document to ingest first")
-    p.add_argument("--n", type=int, default=3)
+    p.add_argument("--n", type=int, default=5)
     args = p.parse_args()
     store = VectorStore()
     if args.path:

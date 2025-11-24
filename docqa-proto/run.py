@@ -17,7 +17,7 @@ def main():
     p.add_argument("--ingest", nargs="+", help="one or more document paths to ingest")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
-    p.add_argument("--qa_n", type=int, default=3, help="number of auto-generated QA pairs after ingest")
+    p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
     p.add_argument("--k", type=int, default=8)
     p.add_argument("--min_score", type=float, default=0.4)
     args = p.parse_args()

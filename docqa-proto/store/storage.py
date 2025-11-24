@@ -167,40 +167,6 @@ class VectorStore:
             out.append((c, float(score)))
         return out
 
-    # ------ cache helpers ------
-    def get_cached_embeddings(self, hashes: List[str]) -> dict[str, np.ndarray]:
-        if not hashes:
-            return {}
-        placeholders = ",".join("?" for _ in hashes)
-        cur = self.conn.cursor()
-        cur.execute(
-            f"SELECT hash, dim, vector FROM embedding_cache WHERE hash IN ({placeholders})",
-            hashes,
-        )
-        out: dict[str, np.ndarray] = {}
-        for hash_value, dim, blob in cur.fetchall():
-            try:
-                arr = np.frombuffer(blob, dtype="float32")
-                if arr.size != dim:
-                    continue
-                out[hash_value] = arr
-            except Exception:
-                continue
-        return out
-
-    def add_cached_embeddings(self, mapping: dict[str, np.ndarray]) -> None:
-        if not mapping:
-            return
-        rows = []
-        for key, vec in mapping.items():
-            arr = vec.astype("float32", copy=False)
-            rows.append((key, arr.size, arr.tobytes()))
-        self.conn.executemany(
-            "INSERT OR REPLACE INTO embedding_cache(hash, dim, vector) VALUES(?,?,?)",
-            rows,
-        )
-        self.conn.commit()
-
     # ------ doc helpers ------
     def list_chunks_by_doc(self, doc_id: str) -> List[StoredChunk]:
         cur = self.conn.cursor()
