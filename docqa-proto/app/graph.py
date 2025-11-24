@@ -4,7 +4,7 @@ import json
 import numpy as np
 from langgraph.graph import StateGraph, END
 from app.cache import DocContextSummaryCache
-from app.llm import client, CHAT_MODEL, embed_texts
+from app.llm import client, CHAT_MODEL, CHAT_MODEL_FAST, embed_texts
 from app.answer import AnswerWithCitations
 from store.storage import VectorStore
 from app.models import ProofSpan
@@ -134,6 +134,8 @@ def _get_or_build_retrieval_pool(
     return hits, new_entry
 
 
+FAST_MODEL = CHAT_MODEL_FAST
+
 def _summarize_context(context: str) -> str:
     prompt = (
         "Read the document excerpt below and summarize the primary topics, goals, and insights "
@@ -141,7 +143,7 @@ def _summarize_context(context: str) -> str:
         f"CONTEXT:\n{context}"
     )
     resp = _openai().chat.completions.create(
-        model=CHAT_MODEL,
+        model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You write concise study guides."},
             {"role": "user", "content": prompt},
@@ -167,7 +169,7 @@ def _propose_questions_from_context(context: str, summary: str, n: int = 6) -> L
         "Return exactly one question per line, with no numbering or bullet characters."
     )
     resp = _openai().chat.completions.create(
-        model=CHAT_MODEL,
+        model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You write excellent study questions."},
             {"role": "user", "content": prompt},
@@ -276,7 +278,7 @@ def _score_questions(context: str, summary: str, questions: List[str]) -> List[D
         "Respond with JSON only."
     )
     resp = _openai().chat.completions.create(
-        model=CHAT_MODEL,
+        model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You are a rigorous evaluator."},
             {"role": "user", "content": prompt},

@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import logging
 import numpy as np
 from app.utils import getenv
@@ -28,6 +28,7 @@ def client():
 
 EMBED_MODEL = getenv("EMBED_MODEL", "text-embedding-3-large")
 CHAT_MODEL = getenv("CHAT_MODEL", "gpt-4o")
+CHAT_MODEL_FAST = getenv("CHAT_MODEL_FAST", "gpt-4o-mini")
 
 def embed_texts(texts: List[str]) -> np.ndarray:
     # OpenAI returns list of vectors
@@ -38,7 +39,12 @@ def embed_texts(texts: List[str]) -> np.ndarray:
 def embed_query(text: str) -> np.ndarray:
     return embed_texts([text])
 
-def generate_alternate_queries(question: str, num_variations: int = 3) -> List[str]:
+def generate_alternate_queries(
+    question: str,
+    num_variations: int = 3,
+    *,
+    model: Optional[str] = None,
+) -> List[str]:
     """
     Use the chat model to produce semantically diverse reformulations of the query
     to improve recall (multi-query retrieval).
@@ -49,7 +55,7 @@ def generate_alternate_queries(question: str, num_variations: int = 3) -> List[s
         f"Return exactly {num_variations} queries, one per line, no numbering."
     )
     resp = client().chat.completions.create(
-        model=CHAT_MODEL,
+        model=model or CHAT_MODEL_FAST,
         messages=[
             {"role": "system", "content": "You are an expert search assistant."},
             {"role": "user", "content": prompt},
@@ -64,7 +70,13 @@ def generate_alternate_queries(question: str, num_variations: int = 3) -> List[s
         queries += [question] * (num_variations - len(queries))
     return queries[:num_variations]
 
-def rerank_chunks(question: str, candidates: List[Tuple[str, str]], top_n: int = 8) -> List[Tuple[int, float]]:
+def rerank_chunks(
+    question: str,
+    candidates: List[Tuple[str, str]],
+    top_n: int = 8,
+    *,
+    model: Optional[str] = None,
+) -> List[Tuple[int, float]]:
     """
     Rerank candidate chunks with the chat model.
     Input: list of (chunk_id, snippet) strings.
@@ -88,7 +100,7 @@ def rerank_chunks(question: str, candidates: List[Tuple[str, str]], top_n: int =
         "CANDIDATES (index<TAB>chunk_id<TAB>text):\n" + "\n".join(lines)
     )
     resp = client().chat.completions.create(
-        model=CHAT_MODEL,
+        model=model or CHAT_MODEL_FAST,
         messages=[
             {"role": "system", "content": instruction},
             {"role": "user", "content": user},

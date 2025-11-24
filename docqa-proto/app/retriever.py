@@ -34,7 +34,7 @@ class Retriever:
         # 1) alternate queries
         alternates = [query]
         try:
-            alternates += generate_alternate_queries(query, num_variations=3)
+            alternates += generate_alternate_queries(query, num_variations=2)
         except Exception:
             # If chat model unavailable, proceed with single query
             pass
