@@ -129,7 +129,7 @@ def retrieve_with_proofs(
 ) -> List[ProofSpan]:
     from app.retriever import Retriever
     store = store or VectorStore()
-    hits = Retriever(store, k=k).search_smart(question, k=k)
+    hits = Retriever(store, k=k).search_smart(question, k=k) 
     allowed = {d for d in allowed_doc_ids if d} if allowed_doc_ids else None
     if allowed:
         hits = [h for h in hits if h.chunk.doc_id in allowed]

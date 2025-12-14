@@ -47,8 +47,6 @@ def _split_sentences(text: str) -> List[str]:
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
 
 def _condense_proof_text(
-    question: str,
-    answer: str,
     proof: ProofSpan,
     max_sentences: int = 2,
     max_chars: int = 550,
@@ -84,7 +82,7 @@ def _condense_proof_text(
             selected_idx = list(range(min(len(sentences), max_sentences)))
     selected_idx = sorted(set(idx for idx in selected_idx if 0 <= idx < len(sentences)))
     if not selected_idx:
-        selected_idx = list(range(min(len(sentences), max_sentences)))
+        selected_idx = list[int](range(min(len(sentences), max_sentences)))
     selected = [sentences[i] for i in selected_idx]
     filtered: List[str] = []
     for sent in selected:
@@ -102,8 +100,6 @@ def _condense_proof_text(
     condensed_parts: List[str] = []
     total_len = 0
     for sentence in selected:
-        if not sentence:
-            continue
         prospective = total_len + len(sentence) + (1 if condensed_parts else 0)
         if condensed_parts and prospective > max_chars:
             break
@@ -180,8 +176,7 @@ def _condense_proofs(
             query = f"{question}\n{answer}".strip() or question
             qa_vec = embed_texts([query])[0]
             qa_norm = np.linalg.norm(qa_vec)
-            if qa_norm > 0:
-                qa_vec = qa_vec / qa_norm
+            qa_vec = qa_vec / np.clip(qa_norm, 1e-12, None)
             sims = (sent_vecs @ qa_vec).tolist()
             for (proof_idx, sent_idx, _), score in zip(flat_sentences, sims):
                 ranked_map.setdefault(proof_idx, []).append((sent_idx, score))
@@ -195,8 +190,6 @@ def _condense_proofs(
         sentences = sentences_by_proof[proof_idx]
         condensed.append(
             _condense_proof_text(
-                question,
-                answer,
                 proof,
                 ranked_sentences=ranked,
                 pretokenized_sentences=sentences,
@@ -234,8 +227,7 @@ def _select_display_proofs(
         key = (answer or question).strip() or question
         key_vec = embed_texts([key])[0]
         key_norm = np.linalg.norm(key_vec)
-        if key_norm > 0:
-            key_vec = key_vec / key_norm
+        key_vec = key_vec / np.clip(key_norm, 1e-12, None)
         text_vecs = embed_texts([text for _, text in entries])
         text_norms = np.linalg.norm(text_vecs, axis=1, keepdims=True)
         text_vecs = text_vecs / np.clip(text_norms, 1e-12, None)
