@@ -6,7 +6,7 @@ import numpy as np
 from openai import OpenAI
 from app.utils import getenv
 from app.llm import CHAT_MODEL, embed_texts
-from app.api import retrieve_with_proofs, retrieve_with_proofs_for_doc
+from app.api import retrieve_with_proofs
 from store.storage import VectorStore
 from app.models import ProofSpan
 
@@ -257,7 +257,6 @@ def generate_answer(
     k: int = 8,
     min_score: float = 0.4,
     model: str = CHAT_MODEL,
-    doc_id: str | None = None,
     allowed_doc_ids: Sequence[str] | None = None,
     store: VectorStore | None = None,
     *,
@@ -269,7 +268,7 @@ def generate_answer(
     Returns the final answer text + the proofs used (for UI / logging).
     """
     # 1) retrieve
-    allowed_set = set(allowed_doc_ids or [])
+    allowed_set = {doc for doc in (allowed_doc_ids or []) if doc}
     store_obj = store or VectorStore()
     target_pool = max(pool_k or k, k)
     if prefetched_pool is not None:
@@ -277,14 +276,13 @@ def generate_answer(
         if len(proofs_all) < target_pool:
             prefetched_pool = None  # force fresh retrieval below
     if prefetched_pool is None:
-        if doc_id:
-            proofs_all = retrieve_with_proofs_for_doc(question, doc_id=doc_id, k=target_pool, store=store_obj)
-        else:
-            proofs_all = retrieve_with_proofs(question, k=target_pool, store=store_obj)
-            if allowed_set:
-                proofs_all = [p for p in proofs_all if p.doc_id in allowed_set]
-    if not allowed_set and doc_id:
-        allowed_set = {doc_id}
+        allowed_list = list(allowed_set) if allowed_set else None
+        proofs_all = retrieve_with_proofs(
+            question,
+            k=target_pool,
+            store=store_obj,
+            allowed_doc_ids=allowed_list,
+        )
     proofs_all = sorted(
         proofs_all,
         key=lambda p: (p.score if p.score is not None else 0.0),

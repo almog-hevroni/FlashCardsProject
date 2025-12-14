@@ -9,6 +9,7 @@ from app.answer import AnswerWithCitations
 from store.storage import VectorStore
 from app.models import ProofSpan
 from app.api import retrieve_with_proofs
+from app.answer import generate_answer
 
 # ------------- State -------------
 
@@ -194,20 +195,20 @@ def _dedupe_questions(
         return questions
     try:
         if store:
-            vecs = _embed_with_store_cache(questions, store)
+            vecs = _embed_with_store_cache(questions, store) #Faiss embedding cache
         else:
-            vecs = embed_texts(questions)
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-        vecs = vecs / np.clip(norms, 1e-12, None)
-        kept: List[str] = []
-        kept_indices: List[int] = []
-        for i, q in enumerate(questions):
+            vecs = embed_texts(questions) #OpenAI embedding
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True) #L2 normalization - Euclidean norm
+        vecs = vecs / np.clip(norms, 1e-12, None) #Normalized vectors for cosine similarity
+        kept: List[str] = [] 
+        kept_indices: List[int] = [] 
+        for i, q in enumerate(questions): #Deduplication
             if not kept_indices:
                 kept.append(q)
                 kept_indices.append(i)
                 continue
-            sims = vecs[i][kept_indices]
-            if sims.size > 0 and np.max(sims) >= threshold:
+            sims = vecs[i][kept_indices] #Cosine similarity between the question and the kept questions
+            if sims.size > 0 and np.max(sims) >= threshold: #If the cosine similarity is greater than the threshold, skip the question
                 continue
             kept.append(q)
             kept_indices.append(i)
@@ -238,24 +239,25 @@ def _build_question_pool(
     if not cleaned:
         return []
     thresholds = [0.85, 0.9, 0.93, 0.97, 0.99]
+    deduped = []
     for thresh in thresholds:
         deduped = _dedupe_questions(cleaned, threshold=thresh, store=store)
         if len(deduped) >= target_count:
             return deduped
-    deduped = _dedupe_questions(cleaned, threshold=0.99, store=store)
+
     seen_lower = {q.lower() for q in deduped}
-    for q in cleaned:
-        if len(deduped) >= target_count:
+    for q in cleaned: 
+        if len(deduped) >= target_count: #If the deduplicated list is already the target count, break
             break
         key = q.lower()
-        if key in seen_lower:
+        if key in seen_lower: #If the question is already in the deduplicated list, skip it
             continue
         deduped.append(q)
         seen_lower.add(key)
     if len(deduped) < target_count:
         idx = 0
         while len(deduped) < target_count:
-            deduped.append(cleaned[idx % len(cleaned)])
+            deduped.append(cleaned[idx % len(cleaned)]) 
             idx += 1
     return deduped[:max(target_count, len(deduped))]
 
@@ -355,21 +357,11 @@ def _answer_with_citations(
     pool_k: Optional[int] = None,
     store: Optional[VectorStore] = None,
 ) -> AnswerWithCitations:
-    from app.answer import generate_answer
     store = store or VectorStore(basepath=store_basepath)
     extra_kwargs = {
         "prefetched_pool": prefetched_pool,
         "pool_k": pool_k,
     }
-    if len(doc_ids) == 1:
-        return generate_answer(
-            question=question,
-            k=k,
-            min_score=min_score,
-            doc_id=doc_ids[0],
-            store=store,
-            **extra_kwargs,
-        )
     return generate_answer(
         question=question,
         k=k,

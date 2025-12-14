@@ -70,30 +70,30 @@ class Retriever:
 
             # MMR selection
             lambda_param = 0.5
-            mmr_size = min(len(candidates), max(k_final * 3, 15))
+            mmr_size = min(len(candidates), max(k_final * 3, 15)) #Max number of candidates to select
             selected: List[int] = []
             remaining = set(range(len(candidates)))
             if remaining:
                 # seed with best sim_to_q
-                first = int(np.argmax(sim_to_q))
+                first = int(np.argmax(sim_to_q)) #Index of the candidate with the highest cosine similarity to the query
                 selected.append(first)
                 remaining.remove(first)
             while remaining and len(selected) < mmr_size:
                 best_idx, best_score = None, -1e9
                 for i in list(remaining):
                     # relevance
-                    relevance = sim_to_q[i]
+                    relevance = sim_to_q[i] #Cosine similarity between the candidate and the query 
                     # diversity: max similarity to already selected
                     if selected:
-                        div = np.max(cand_emb[i] @ cand_emb[selected].T)
+                        div = np.max(cand_emb[i] @ cand_emb[selected].T) #Cosine similarity between the candidate and the already selected candidates
                     else:
                         div = 0.0
-                    score = lambda_param * relevance - (1.0 - lambda_param) * div
+                    score = lambda_param * relevance - (1.0 - lambda_param) * div #Score - still relevant and not too similar to what we already have.
                     if score > best_score:
                         best_idx, best_score = i, score
                 selected.append(best_idx)  # type: ignore
                 remaining.remove(best_idx)  # type: ignore
-            mmr_indices = selected
+            mmr_indices = selected #Indices of the candidates selected by MMR
         except Exception:
             # If embeddings fail, just take top by vector score
             order = np.argsort(-vec_scores)
@@ -103,9 +103,9 @@ class Retriever:
         diversified = []
         for i in mmr_indices:
             chunk = candidates[i]
-            vec_s = float(np.clip(vec_scores[i], 0.0, 1.0))
-            rel = float(sim_to_q[i]) if "sim_to_q" in locals() else vec_s
-            score = 0.7 * rel + 0.3 * vec_s
+            vec_s = float(np.clip(vec_scores[i], 0.0, 1.0)) #Vector score of the candidate
+            rel = float(sim_to_q[i]) if "sim_to_q" in locals() else vec_s #Cosine similarity between the candidate and the query
+            score = 0.7 * rel + 0.3 * vec_s #Score - ordering the selected candidates before returning them
             diversified.append((chunk, score))
 
         diversified.sort(key=lambda x: x[1], reverse=True)
