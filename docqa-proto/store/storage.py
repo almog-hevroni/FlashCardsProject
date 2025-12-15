@@ -137,9 +137,9 @@ class VectorStore:
         if vectors.dtype != np.float32:
             vectors = vectors.astype("float32")
         if _FAISS_AVAILABLE:
-            faiss.normalize_L2(vectors)  
-            self.index.add(vectors)
-            faiss.write_index(self.index, str(self.index_path))
+            faiss.normalize_L2(vectors)  # type: ignore
+            self.index.add(vectors)  # type: ignore
+            faiss.write_index(self.index, str(self.index_path))  # type: ignore
         else:
             # fallback index keeps its own storage
             self.index.add(vectors)

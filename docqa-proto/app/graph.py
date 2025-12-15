@@ -9,7 +9,6 @@ from app.answer import AnswerWithCitations
 from store.storage import VectorStore
 from app.models import ProofSpan
 from app.api import retrieve_with_proofs
-from app.answer import generate_answer
 
 # ------------- State -------------
 
@@ -100,9 +99,13 @@ def _get_context_and_summary(store: VectorStore, doc_ids: Sequence[str], basepat
             context = cached.get("context", "")
             summary = cached.get("summary", "")
         else:
+            #get a random seed based on the doc_id
             seed = int(_hash_text(doc_id), 16) % (2**32)
+            #sample 24 chunks from the document
             context = _sample_doc_context(store, [doc_id], n=24, seed=seed)
+            #summarize the context
             summary = _summarize_context(context)
+            #cache the context and summary
             cache.set(doc_id, context, summary)
         if context:
             contexts.append(context)
@@ -195,20 +198,20 @@ def _dedupe_questions(
         return questions
     try:
         if store:
-            vecs = _embed_with_store_cache(questions, store) #Faiss embedding cache
+            vecs = _embed_with_store_cache(questions, store)
         else:
-            vecs = embed_texts(questions) #OpenAI embedding
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True) #L2 normalization - Euclidean norm
-        vecs = vecs / np.clip(norms, 1e-12, None) #Normalized vectors for cosine similarity
-        kept: List[str] = [] 
-        kept_indices: List[int] = [] 
-        for i, q in enumerate(questions): #Deduplication
+            vecs = embed_texts(questions)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        vecs = vecs / np.clip(norms, 1e-12, None)
+        kept: List[str] = []
+        kept_indices: List[int] = []
+        for i, q in enumerate(questions):
             if not kept_indices:
                 kept.append(q)
                 kept_indices.append(i)
                 continue
-            sims = vecs[i][kept_indices] #Cosine similarity between the question and the kept questions
-            if sims.size > 0 and np.max(sims) >= threshold: #If the cosine similarity is greater than the threshold, skip the question
+            sims = vecs[i][kept_indices]
+            if sims.size > 0 and np.max(sims) >= threshold:
                 continue
             kept.append(q)
             kept_indices.append(i)
@@ -233,31 +236,32 @@ def _build_question_pool(
     Ensure we have at least target_count question candidates.
     Start with aggressive deduplication and gradually relax if we fall short.
     """
+    #clean the questions by removing whitespace
     cleaned = [q.strip() for q in raw_questions if q.strip()]
     if target_count <= 0:
         return []
     if not cleaned:
         return []
+    #deduplicate the questions using different thresholds
     thresholds = [0.85, 0.9, 0.93, 0.97, 0.99]
-    deduped = []
     for thresh in thresholds:
         deduped = _dedupe_questions(cleaned, threshold=thresh, store=store)
         if len(deduped) >= target_count:
             return deduped
-
+    deduped = _dedupe_questions(cleaned, threshold=0.99, store=store)
     seen_lower = {q.lower() for q in deduped}
-    for q in cleaned: 
-        if len(deduped) >= target_count: #If the deduplicated list is already the target count, break
+    for q in cleaned:
+        if len(deduped) >= target_count:
             break
         key = q.lower()
-        if key in seen_lower: #If the question is already in the deduplicated list, skip it
+        if key in seen_lower:
             continue
         deduped.append(q)
         seen_lower.add(key)
     if len(deduped) < target_count:
         idx = 0
         while len(deduped) < target_count:
-            deduped.append(cleaned[idx % len(cleaned)]) 
+            deduped.append(cleaned[idx % len(cleaned)])
             idx += 1
     return deduped[:max(target_count, len(deduped))]
 
@@ -357,11 +361,21 @@ def _answer_with_citations(
     pool_k: Optional[int] = None,
     store: Optional[VectorStore] = None,
 ) -> AnswerWithCitations:
+    from app.answer import generate_answer
     store = store or VectorStore(basepath=store_basepath)
     extra_kwargs = {
         "prefetched_pool": prefetched_pool,
         "pool_k": pool_k,
     }
+    if len(doc_ids) == 1:
+        return generate_answer(
+            question=question,
+            k=k,
+            min_score=min_score,
+            doc_id=doc_ids[0],
+            store=store,
+            **extra_kwargs,
+        )
     return generate_answer(
         question=question,
         k=k,

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Sequence, Optional
+from typing import Any, List, Sequence, Optional
 import json
 import re
 import numpy as np
@@ -47,6 +47,8 @@ def _split_sentences(text: str) -> List[str]:
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
 
 def _condense_proof_text(
+    question: str,
+    answer: str,
     proof: ProofSpan,
     max_sentences: int = 2,
     max_chars: int = 550,
@@ -82,8 +84,8 @@ def _condense_proof_text(
             selected_idx = list(range(min(len(sentences), max_sentences)))
     selected_idx = sorted(set(idx for idx in selected_idx if 0 <= idx < len(sentences)))
     if not selected_idx:
-        selected_idx = list[int](range(min(len(sentences), max_sentences)))
-    selected = [sentences[i] for i in selected_idx]
+        selected_idx = list(range(min(len(sentences), max_sentences)))
+    selected = [sentences[i] for i in selected_idx] #best sentences selected
     filtered: List[str] = []
     for sent in selected:
         sentence = _clean_text(sent)
@@ -99,6 +101,7 @@ def _condense_proof_text(
         selected = filtered
     condensed_parts: List[str] = []
     total_len = 0
+    # Condense the selected sentences into a single string
     for sentence in selected:
         prospective = total_len + len(sentence) + (1 if condensed_parts else 0)
         if condensed_parts and prospective > max_chars:
@@ -107,7 +110,7 @@ def _condense_proof_text(
         total_len = prospective
     if not condensed_parts:
         condensed_parts = [selected[0].strip()]
-    condensed = " ".join(condensed_parts).strip()
+    condensed = " ".join(condensed_parts).strip() #condensed string
     if not condensed:
         condensed = original if len(original) <= max_chars else original[:max_chars]
     return ProofSpan(
@@ -176,9 +179,10 @@ def _condense_proofs(
             query = f"{question}\n{answer}".strip() or question
             qa_vec = embed_texts([query])[0]
             qa_norm = np.linalg.norm(qa_vec)
-            qa_vec = qa_vec / np.clip(qa_norm, 1e-12, None)
+            if qa_norm > 0:
+                qa_vec = qa_vec / qa_norm
             sims = (sent_vecs @ qa_vec).tolist()
-            for (proof_idx, sent_idx, _), score in zip(flat_sentences, sims):
+            for (proof_idx, sent_idx, _), score in zip[tuple[tuple[int, int, str], Any]](flat_sentences, sims):
                 ranked_map.setdefault(proof_idx, []).append((sent_idx, score))
             for proof_idx in ranked_map:
                 ranked_map[proof_idx].sort(key=lambda x: x[1], reverse=True)
@@ -190,6 +194,8 @@ def _condense_proofs(
         sentences = sentences_by_proof[proof_idx]
         condensed.append(
             _condense_proof_text(
+                question,
+                answer,
                 proof,
                 ranked_sentences=ranked,
                 pretokenized_sentences=sentences,
@@ -227,7 +233,8 @@ def _select_display_proofs(
         key = (answer or question).strip() or question
         key_vec = embed_texts([key])[0]
         key_norm = np.linalg.norm(key_vec)
-        key_vec = key_vec / np.clip(key_norm, 1e-12, None)
+        if key_norm > 0:
+            key_vec = key_vec / key_norm
         text_vecs = embed_texts([text for _, text in entries])
         text_norms = np.linalg.norm(text_vecs, axis=1, keepdims=True)
         text_vecs = text_vecs / np.clip(text_norms, 1e-12, None)
@@ -344,7 +351,7 @@ def generate_answer(
     )
     display_proofs = _select_display_proofs(question, answer_text, final_proofs)
 
-    # 4) return both the answer and the proof objects for UI - UI/logging
+    # 4) return both the answer and the proof objects for UI
     return AnswerWithCitations(
         answer=answer_text,
         proofs=display_proofs,

@@ -8,6 +8,7 @@ class Chunk(TypedDict):
     start: int
     end: int
 
+# Split long text into segments
 def _split_long_text(text: str, max_len: int) -> List[str]:
     segments: List[str] = []
     i, n = 0, len(text)
@@ -47,6 +48,7 @@ def _split_paras(text: str, max_len: int) -> List[str]:
             paras.extend(_split_long_text(p, max_len))
         else:
             paras.append(p)
+    #Handle remaining text in buffer (the last paragraph)        
     if buf:
         joined = " ".join(buf).strip()
         if joined:

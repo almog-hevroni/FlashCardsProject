@@ -32,7 +32,9 @@ CHAT_MODEL_FAST = getenv("CHAT_MODEL_FAST", "gpt-4o-mini")
 
 def embed_texts(texts: List[str]) -> np.ndarray:
     # OpenAI returns list of vectors
+    # Create embeddings for the texts
     resp = client().embeddings.create(model=EMBED_MODEL, input=texts)
+    # Extract the embeddings from the response to an array of arrays
     vecs = [d.embedding for d in resp.data]
     return np.array(vecs, dtype="float32")
 
@@ -69,5 +71,4 @@ def generate_alternate_queries(
         # pad with original question if the model returned fewer
         queries += [question] * (num_variations - len(queries))
     return queries[:num_variations]
-    
 
