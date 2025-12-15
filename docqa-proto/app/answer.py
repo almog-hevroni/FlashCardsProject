@@ -344,7 +344,7 @@ def generate_answer(
     )
     display_proofs = _select_display_proofs(question, answer_text, final_proofs)
 
-    # 4) return both the answer and the proof objects for UI
+    # 4) return both the answer and the proof objects for UI - UI/logging
     return AnswerWithCitations(
         answer=answer_text,
         proofs=display_proofs,

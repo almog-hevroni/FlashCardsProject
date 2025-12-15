@@ -69,4 +69,5 @@ def generate_alternate_queries(
         # pad with original question if the model returned fewer
         queries += [question] * (num_variations - len(queries))
     return queries[:num_variations]
+    
 
