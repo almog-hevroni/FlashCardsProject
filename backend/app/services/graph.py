@@ -1,14 +1,20 @@
 from typing import Any, Dict, List, Optional, Sequence, TypedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import logging
+import os
+import time
 import numpy as np
 from langgraph.graph import StateGraph, END
 from app.data.cache import DocContextSummaryCache
-from app.services.llm import client, CHAT_MODEL, CHAT_MODEL_FAST, embed_texts
+from app.services.llm import chat_completions_create, client, CHAT_MODEL, CHAT_MODEL_FAST, embed_texts
 from app.services.qa import AnswerWithCitations, generate_answer
 from app.data.vector_store import VectorStore
 from app.api.schemas import ProofSpan
 from app.services.retrieval import retrieve_with_proofs
+
+logger = logging.getLogger(__name__)
 
 # ------------- State -------------
 
@@ -144,7 +150,7 @@ def _summarize_context(context: str) -> str:
         "that a learner should focus on. Ignore side anecdotes or illustrative examples that are not central.\n\n"
         f"CONTEXT:\n{context}"
     )
-    resp = _openai().chat.completions.create(
+    resp = chat_completions_create(
         model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You write concise study guides."},
@@ -170,7 +176,7 @@ def _propose_questions_from_context(context: str, summary: str, n: int = 6) -> L
         "- Avoid questions that could be answered without reading the document, or that reference minor illustrations.\n"
         "Return exactly one question per line, with no numbering or bullet characters."
     )
-    resp = _openai().chat.completions.create(
+    resp = chat_completions_create(
         model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You write excellent study questions."},
@@ -279,7 +285,7 @@ def _score_questions(context: str, summary: str, questions: List[str]) -> List[D
         "Score near 0 if a question is primarily about tangential examples or trivia.\n"
         "Respond with JSON only."
     )
-    resp = _openai().chat.completions.create(
+    resp = chat_completions_create(
         model=FAST_MODEL,
         messages=[
             {"role": "system", "content": "You are a rigorous evaluator."},
@@ -381,7 +387,7 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
         f"QUESTION:\n{question}\n\nANSWER:\n{answer}\n\nSOURCES:\n{src}"
     )
     try:
-        resp = _openai().chat.completions.create(
+        resp = chat_completions_create(
             model=CHAT_MODEL,
             messages=[{"role": "system", "content": "You are a strict fact-checker."},
                       {"role": "user", "content": prompt}],
@@ -391,7 +397,7 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
         )
         raw = resp.choices[0].message.content or "{}"
     except Exception:
-        resp = _openai().chat.completions.create(
+        resp = chat_completions_create(
             model=CHAT_MODEL,
             messages=[{"role": "system", "content": "You are a strict fact-checker."},
                       {"role": "user", "content": prompt}],
@@ -574,6 +580,64 @@ def node_next_or_finish(state: State) -> State:
         "min_score": 0.4,
     }
 
+# ------------- Per-question runner (isolated) -------------
+
+def run_single_question(
+    *,
+    question: str,
+    question_score: float,
+    doc_ids: Sequence[str],
+    store_basepath: str,
+    k: int = 10,
+    min_score: float = 0.4,
+    max_attempts: int = 3,
+) -> QAItem:
+    """
+    Runs the exact same per-question pipeline currently implemented by the graph:
+    answer -> judge -> (strengthen -> answer -> judge)* until accept/force-accept.
+
+    This function is intentionally isolated (no shared state) to enable safe parallelism later.
+    """
+    state: State = {
+        "doc_ids": [d for d in doc_ids if d],
+        "store_basepath": store_basepath,
+        "k": k,
+        "min_score": min_score,
+        "target_n": 1,
+        "attempts": 0,
+        "max_attempts": max_attempts,
+        "questions": [question],
+        "question_scores": [question_score],
+        "current_index": 0,
+        "qa": [],
+        "working_answer": None,
+        "working_proofs": None,
+        "working_score": None,
+        "working_answer_critique": None,
+        "last_critique": None,
+        "summary": "",
+        "retrieval_cache": {},
+    }
+
+    while True:
+        state = node_answer(state)
+        state = node_judge(state)
+        decision = should_retry(state)
+        if decision == "retry":
+            state = node_strengthen(state)
+            continue
+        # accept path: either accepted or force-accepted; for this single question we expect 1 QA item.
+        if state["qa"]:
+            return state["qa"][0]
+        # Extremely defensive fallback (shouldn't happen): return whatever was computed.
+        return {
+            "question": question,
+            "answer": state.get("working_answer") or "",
+            "proofs": [p.model_dump() for p in (state.get("working_proofs") or [])],
+            "question_score": question_score,
+            "answer_score": float(state.get("working_score") or 0.0),
+        }
+
 # ------------- Build graph -------------
 
 def build_graph():
@@ -609,7 +673,7 @@ def build_graph():
 # ------------- Runner -------------
 
 def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 5, store_basepath: str = "store") -> Dict[str, Any]:
-    graph = build_graph()
+    t0 = time.monotonic()
     doc_id_list = [d for d in doc_ids if d]
     if not doc_id_list:
         return {"doc_ids": [], "n": 0, "items": [], "report": ""}
@@ -633,12 +697,59 @@ def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 5, store_basepa
         "summary": "",
         "retrieval_cache": {},
     }
-    final_state = graph.invoke(init)
-    report = _format_report(final_state["qa"])
+
+    # Step 1: generate all questions once (same logic as the graph entry node)
+    q_state = node_propose_questions(init)
+    questions = q_state.get("questions", [])[:num_questions]
+    question_scores = q_state.get("question_scores", [])
+
+    # Step 2: fan-out per-question pipeline runs (same per-question logic; isolated state per task)
+    items: List[QAItem] = []
+    if questions:
+        # Configurable concurrency cap. Keep conservative default to avoid rate-limit storms.
+        # You can override with QA_MAX_WORKERS=3/4/5.
+        raw_workers = os.getenv("QA_MAX_WORKERS", "2")
+        try:
+            configured_workers = int(raw_workers)
+        except Exception:
+            configured_workers = 2
+        if configured_workers <= 0:
+            configured_workers = 1
+        max_workers = min(configured_workers, len(questions))
+        logger.info(
+            "QA generation using %d worker(s) (QA_MAX_WORKERS=%r, questions=%d)",
+            max_workers,
+            raw_workers,
+            len(questions),
+        )
+        results: List[Optional[QAItem]] = [None] * len(questions)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for idx, q in enumerate(questions):
+                q_score = question_scores[idx] if idx < len(question_scores) else 0.5
+                fut = ex.submit(
+                    run_single_question,
+                    question=q,
+                    question_score=q_score,
+                    doc_ids=doc_id_list,
+                    store_basepath=store_basepath,
+                    k=init["k"],
+                    min_score=init["min_score"],
+                    max_attempts=init["max_attempts"],
+                )
+                futures[fut] = idx
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                results[idx] = fut.result()
+        items = [it for it in results if it is not None]
+
+    report = _format_report(items)
+    elapsed_s = time.monotonic() - t0
+    logger.info("QA generation completed in %.2f minutes (%.1f seconds)", elapsed_s / 60.0, elapsed_s)
     return {
         "doc_ids": doc_id_list,
-        "n": len(final_state["qa"]),
-        "items": final_state["qa"],
+        "n": len(items),
+        "items": items,
         "report": report,
     }
 

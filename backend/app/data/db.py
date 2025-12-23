@@ -4,6 +4,9 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Iterable
 from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class StoredChunk:
@@ -18,7 +21,15 @@ class SQLiteDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        # Use a non-zero timeout and WAL mode to reduce "database is locked" errors
+        # when multiple threads/processes read/write concurrently.
+        self.conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
+            self.conn.execute("PRAGMA busy_timeout=5000;")
+        except Exception as exc:
+            logger.warning("SQLite PRAGMA setup failed; continuing without WAL/busy_timeout. Error=%s", repr(exc))
         self._ensure_schema()
 
     def _ensure_schema(self):

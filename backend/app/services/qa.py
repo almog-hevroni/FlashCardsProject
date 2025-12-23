@@ -3,9 +3,7 @@ from typing import List, Sequence, Optional
 import json
 import re
 import numpy as np
-from openai import OpenAI
-from app.utils.common import getenv
-from app.services.llm import CHAT_MODEL, embed_texts
+from app.services.llm import CHAT_MODEL, chat_completions_create, embed_texts
 from app.services.retrieval import retrieve_with_proofs
 from app.data.vector_store import VectorStore
 from app.api.schemas import ProofSpan
@@ -249,11 +247,11 @@ def generate_answer(
     k: int = 8,
     min_score: float = 0.4,
     model: str = CHAT_MODEL,
-    allowed_doc_ids: Sequence[str] | None = None,
-    store: VectorStore | None = None,
+    allowed_doc_ids: Optional[Sequence[str]] = None,
+    store: Optional[VectorStore] = None,
     *,
-    prefetched_pool: Sequence[ProofSpan] | None = None,
-    pool_k: int | None = None,
+    prefetched_pool: Optional[Sequence[ProofSpan]] = None,
+    pool_k: Optional[int] = None,
 ) -> AnswerWithCitations:
     """
     Retrieve top-k proofs, filter by score, then ask the LLM to answer using only those proofs.
@@ -295,7 +293,6 @@ def generate_answer(
     context = _build_context(prompt_proofs)
 
     # 3) ask the model, but force ground-truth behavior
-    client = OpenAI(api_key=getenv("OPENAI_API_KEY"))
     sys_prompt = (
         "You are a careful assistant that writes flashcard-friendly answers.\n"
         "Answer ONLY using the provided sources.\n"
@@ -316,7 +313,7 @@ def generate_answer(
         "- Output valid JSON only."
     )
 
-    resp = client.chat.completions.create(
+    resp = chat_completions_create(
         model=model,
         messages=[
             {"role": "system", "content": sys_prompt},

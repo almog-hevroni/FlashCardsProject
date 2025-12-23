@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Sequence
 import numpy as np
-from app.services.llm import client, CHAT_MODEL_FAST, embed_query, embed_texts
+from app.services.llm import CHAT_MODEL_FAST, chat_completions_create, embed_query, embed_texts
 from app.data.vector_store import VectorStore, StoredChunk
 from app.api.schemas import ProofSpan
 
@@ -25,7 +25,7 @@ def generate_alternate_queries(
         f"Original question: {question}\n"
         f"Return exactly {num_variations} queries, one per line, no numbering."
     )
-    resp = client().chat.completions.create(
+    resp = chat_completions_create(
         model=model or CHAT_MODEL_FAST,
         messages=[
             {"role": "system", "content": "You are an expert search assistant."},
@@ -51,7 +51,7 @@ class Retriever:
         hits = self.store.topk(qvec, self.k)
         return [Retrieval(chunk=h[0], score=h[1]) for h in hits]
 
-    def search_smart(self, query: str, k: int | None = None) -> List[Retrieval]:
+    def search_smart(self, query: str, k: Optional[int] = None) -> List[Retrieval]:
         """
         Multi-query + diversification + LLM reranking pipeline:
         1) Generate alternate queries to improve recall

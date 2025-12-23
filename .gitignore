@@ -10,15 +10,21 @@ __pycache__/
 .env
 .env.*
 
-# Local files
-app.db
+# Local runtime files
 uploads/
 
-# Project artifacts
-docqa-proto/store/faiss.index
-docqa-proto/store/meta.sqlite
-docqa-proto/samples/
-docqa-proto/uploads/
+# Backend runtime artifacts (vector store / sqlite)
+backend/store/
+backend/store/*.sqlite
+backend/store/*.sqlite-wal
+backend/store/*.sqlite-shm
+backend/store/*.sqlite-journal
+backend/store/*.db
+backend/store/*.db-wal
+backend/store/*.db-shm
+backend/store/faiss.index
+backend/store/vectors.npy
+backend/uploads/
 
 # OS/IDE
 .DS_Store
