@@ -2,9 +2,11 @@ import sqlite3
 import json
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Iterable
+from typing import List, Dict, Optional, Any, Iterable, Sequence
 from dataclasses import dataclass
 import logging
+import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,16 @@ class StoredChunk:
     start: int
     end: int
     text: str
+
+@dataclass
+class StoredExam:
+    exam_id: str
+    user_id: str
+    title: str
+    mode: str
+    created_at: str
+    updated_at: str
+    info: Dict[str, Any]
 
 class SQLiteDB:
     def __init__(self, db_path: Path):
@@ -54,6 +66,54 @@ class SQLiteDB:
             dim INTEGER,
             vector BLOB
         );
+
+        -- -----------------------------
+        -- Stable mapping: vector index position -> chunk_id
+        -- -----------------------------
+        CREATE TABLE IF NOT EXISTS vector_index_map(
+            vector_index INTEGER PRIMARY KEY,
+            chunk_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vector_index_map_chunk_id ON vector_index_map(chunk_id);
+
+        -- -----------------------------
+        -- Exams / users
+        -- -----------------------------
+        CREATE TABLE IF NOT EXISTS users(
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        );
+
+        CREATE TABLE IF NOT EXISTS exams(
+            exam_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'mastery',
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            updated_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            info TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS exam_documents(
+            exam_id TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            added_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            PRIMARY KEY (exam_id, doc_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS events(
+            event_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            exam_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            payload TEXT,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_exams_user_id ON exams(user_id);
+        CREATE INDEX IF NOT EXISTS idx_exam_documents_exam_id ON exam_documents(exam_id);
+        CREATE INDEX IF NOT EXISTS idx_events_exam_id ON events(exam_id);
         """)
         self.conn.commit()
 
@@ -68,6 +128,199 @@ class SQLiteDB:
         self.conn.executemany(
             "INSERT OR REPLACE INTO chunks(chunk_id, doc_id, page, start, end, text) VALUES(?,?,?,?,?,?)", rows)
         self.conn.commit()
+
+    # -----------------------------
+    # Exam helpers
+    # -----------------------------
+    def ensure_user(self, user_id: str, *, name: Optional[str] = None) -> None:
+        """
+        Create user row if it doesn't exist. Safe to call repeatedly.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO users(user_id, name) VALUES(?,?)",
+            (user_id, name),
+        )
+        if name is not None:
+            self.conn.execute(
+                "UPDATE users SET name=? WHERE user_id=?",
+                (name, user_id),
+            )
+        self.conn.commit()
+
+    def create_exam(
+        self,
+        *,
+        user_id: str,
+        title: str,
+        mode: str = "mastery",
+        info: Optional[Dict[str, Any]] = None,
+        exam_id: Optional[str] = None,
+    ) -> str:
+        """
+        Create an exam workspace (like a ChatGPT thread). Returns exam_id.
+        """
+        self.ensure_user(user_id)
+        eid = exam_id or uuid.uuid4().hex[:16]
+        now = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(info or {}, ensure_ascii=False)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO exams(exam_id, user_id, title, mode, created_at, updated_at, info) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (eid, user_id, title, mode, now, now, payload),
+        )
+        self.conn.commit()
+        return eid
+
+    def update_exam(self, exam_id: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE exams SET updated_at=? WHERE exam_id=?",
+            (now, exam_id),
+        )
+        self.conn.commit()
+
+    def get_exam(self, exam_id: str) -> Optional[StoredExam]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT exam_id, user_id, title, mode, created_at, updated_at, info FROM exams WHERE exam_id=?",
+            (exam_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        info_raw = row[6] or "{}"
+        try:
+            info = json.loads(info_raw) if isinstance(info_raw, str) else {}
+        except Exception:
+            info = {}
+        return StoredExam(
+            exam_id=row[0],
+            user_id=row[1],
+            title=row[2],
+            mode=row[3],
+            created_at=row[4],
+            updated_at=row[5],
+            info=info,
+        )
+
+    def list_exams(self, *, user_id: str, limit: int = 50) -> List[StoredExam]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT exam_id, user_id, title, mode, created_at, updated_at, info "
+            "FROM exams WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            (user_id, limit),
+        )
+        rows = cur.fetchall()
+        out: List[StoredExam] = []
+        for row in rows:
+            info_raw = row[6] or "{}"
+            try:
+                info = json.loads(info_raw) if isinstance(info_raw, str) else {}
+            except Exception:
+                info = {}
+            out.append(
+                StoredExam(
+                    exam_id=row[0],
+                    user_id=row[1],
+                    title=row[2],
+                    mode=row[3],
+                    created_at=row[4],
+                    updated_at=row[5],
+                    info=info,
+                )
+            )
+        return out
+
+    def attach_documents_to_exam(self, *, exam_id: str, doc_ids: Sequence[str]) -> None:
+        ids = [d for d in doc_ids if d]
+        if not ids:
+            return
+        rows = [(exam_id, doc_id) for doc_id in ids]
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO exam_documents(exam_id, doc_id) VALUES(?,?)",
+            rows,
+        )
+        self.conn.commit()
+        self.update_exam(exam_id)
+
+    def list_exam_documents(self, *, exam_id: str) -> List[str]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT doc_id FROM exam_documents WHERE exam_id=? ORDER BY added_at ASC",
+            (exam_id,),
+        )
+        return [r[0] for r in cur.fetchall() if r and r[0]]
+
+    def add_event(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        event_id: Optional[str] = None,
+    ) -> str:
+        """
+        Append an immutable event to the exam history (ratings, next-card served, etc.).
+        """
+        self.ensure_user(user_id)
+        eid = event_id or uuid.uuid4().hex[:20]
+        payload_raw = json.dumps(payload or {}, ensure_ascii=False)
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT INTO events(event_id, user_id, exam_id, type, payload, created_at) VALUES(?,?,?,?,?,?)",
+            (eid, user_id, exam_id, type, payload_raw, now),
+        )
+        self.conn.commit()
+        self.update_exam(exam_id)
+        return eid
+
+    # -----------------------------
+    # Vector index mapping helpers
+    # -----------------------------
+    def add_vector_index_mapping(self, *, start_index: int, chunk_ids: Sequence[str]) -> None:
+        """
+        Persist mapping from vector index positions [start_index .. start_index+N-1] to chunk_ids,
+        in the exact order vectors were added to the vector index.
+        """
+        ids = [c for c in chunk_ids if c]
+        if not ids:
+            return
+        rows = [(start_index + i, cid) for i, cid in enumerate(ids)]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO vector_index_map(vector_index, chunk_id) VALUES(?,?)",
+            rows,
+        )
+        self.conn.commit()
+
+    def get_chunk_by_id(self, chunk_id: str) -> Optional[StoredChunk]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT chunk_id, doc_id, page, start, end, text FROM chunks WHERE chunk_id=?",
+            (chunk_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return StoredChunk(*row)
+
+    def get_chunk_by_vector_index(self, vector_index: int) -> Optional[StoredChunk]:
+        """
+        Preferred stable lookup: vector_index -> chunk_id -> chunk row.
+        Falls back to legacy LIMIT/OFFSET if mapping isn't present (older stores).
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT chunk_id FROM vector_index_map WHERE vector_index=?",
+            (vector_index,),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            ch = self.get_chunk_by_id(str(row[0]))
+            if ch:
+                return ch
+        # Fallback for older DBs (pre-mapping)
+        return self.get_chunk_by_index(vector_index)
 
     def get_chunk_by_index(self, index: int) -> Optional[StoredChunk]:
         """

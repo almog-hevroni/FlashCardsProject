@@ -90,17 +90,28 @@ class VectorStore:
             self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
         self.vector_dimension = VEC_DIM
 
+    def _index_size(self) -> int:
+        if _FAISS_AVAILABLE:
+            return int(getattr(self.index, "ntotal", 0))
+        # numpy fallback index
+        return int(getattr(self.index, "vectors", np.zeros((0, VEC_DIM), dtype="float32")).shape[0])
+
     # ------ write ------
     def add_document(self, doc_id: str, path: str, title: str, info: dict):
         self.db.add_document(doc_id, path, title, info)
 
     def add_chunks(self, chunk_rows: Iterable[StoredChunk], vectors: np.ndarray):
-        # 1. Save metadata to SQL
-        self.db.add_chunks(chunk_rows)
+        # Materialize to preserve insertion order for vector_index_map.
+        chunk_list = list(chunk_rows)
 
-        # 2. Add vectors to Index
+        # 1) Save metadata to SQL
+        self.db.add_chunks(chunk_list)
+
+        # 2) Add vectors to Index + persist stable mapping
         if vectors.dtype != np.float32:
             vectors = vectors.astype("float32")
+
+        start_index = self._index_size()
         
         if _FAISS_AVAILABLE:
             faiss.normalize_L2(vectors)
@@ -108,6 +119,12 @@ class VectorStore:
             faiss.write_index(self.index, str(self.index_path))
         else:
             self.index.add(vectors)
+
+        # Persist mapping from vector positions -> chunk_id for stable retrieval
+        self.db.add_vector_index_mapping(
+            start_index=start_index,
+            chunk_ids=[c.chunk_id for c in chunk_list],
+        )
 
     # ------ read/search ------
     def topk(self, query_vec: np.ndarray, k: int = 5) -> List[Tuple[StoredChunk, float]]:
@@ -125,7 +142,7 @@ class VectorStore:
         for idx, score in zip(I[0].tolist(), D[0].tolist()):
             if idx < 0: continue
             
-            chunk = self.db.get_chunk_by_index(idx)
+            chunk = self.db.get_chunk_by_vector_index(idx)
             if not chunk: continue
             
             out.append((chunk, float(score)))
