@@ -14,6 +14,7 @@ from app.data.vector_store import VectorStore
 from app.services.qa import generate_answer
 from app.services.graph import run_generate_qa
 from app.services.exams import create_exam, load_exam, attach_documents, log_event
+from app.services.topics import build_topics_for_exam, list_topics_for_exam
 
 def main():
     p = argparse.ArgumentParser()
@@ -23,6 +24,8 @@ def main():
     p.add_argument("--exam_mode", default="mastery", help="mastery|exam (for --create_exam)")
     p.add_argument("--user_id", default="local_user", help="local-first user id")
     p.add_argument("--exam_id", help="existing exam id (to attach documents or inspect)")
+    p.add_argument("--build_topics", action="store_true", help="build topics for --exam_id")
+    p.add_argument("--topic_merge_threshold", type=float, default=0.88, help="merge topics if centroid similarity >= threshold (default 0.88)")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
     p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
@@ -31,6 +34,20 @@ def main():
     args = p.parse_args()
 
     store = VectorStore()
+
+    if args.build_topics:
+        if not args.exam_id:
+            raise SystemExit("--build_topics requires --exam_id")
+        topics = build_topics_for_exam(
+            exam_id=args.exam_id,
+            store=store,
+            overwrite=True,
+            merge_threshold=args.topic_merge_threshold,
+        )
+        print(f"Built {len(topics)} topic(s) for exam_id={args.exam_id}")
+        for t in list_topics_for_exam(exam_id=args.exam_id, store=store):
+            print(f"- {t.topic_id}: {t.label}")
+        return
 
     if args.create_exam:
         eid = create_exam(

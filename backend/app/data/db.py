@@ -261,6 +261,30 @@ class SQLiteDB:
             )
         return out
 
+    def delete_topics_for_exam(self, *, exam_id: str) -> None:
+        """
+        Remove all topics (and their chunk assignments + evidence) for an exam.
+        """
+        topics = self.list_topics(exam_id=exam_id)
+        if not topics:
+            return
+        topic_ids = [t.topic_id for t in topics if t.topic_id]
+        placeholders = ",".join("?" for _ in topic_ids)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"DELETE FROM topic_evidence WHERE topic_id IN ({placeholders})",
+            topic_ids,
+        )
+        cur.execute(
+            f"DELETE FROM topic_chunks WHERE topic_id IN ({placeholders})",
+            topic_ids,
+        )
+        cur.execute(
+            "DELETE FROM topics WHERE exam_id=?",
+            (exam_id,),
+        )
+        self.conn.commit()
+
     def replace_topic_chunks(self, *, topic_id: str, chunk_ids: Sequence[str]) -> None:
         ids = [c for c in chunk_ids if c]
         cur = self.conn.cursor()
