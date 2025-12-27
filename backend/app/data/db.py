@@ -29,6 +29,14 @@ class StoredExam:
     updated_at: str
     info: Dict[str, Any]
 
+@dataclass
+class StoredTopic:
+    topic_id: str
+    exam_id: str
+    label: str
+    created_at: str
+    info: Dict[str, Any]
+
 class SQLiteDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -75,6 +83,37 @@ class SQLiteDB:
             chunk_id TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_vector_index_map_chunk_id ON vector_index_map(chunk_id);
+
+        -- -----------------------------
+        -- Topics (per exam)
+        -- -----------------------------
+        CREATE TABLE IF NOT EXISTS topics(
+            topic_id TEXT PRIMARY KEY,
+            exam_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            info TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_topics_exam_id ON topics(exam_id);
+
+        CREATE TABLE IF NOT EXISTS topic_chunks(
+            topic_id TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            PRIMARY KEY (topic_id, chunk_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_topic_chunks_chunk_id ON topic_chunks(chunk_id);
+
+        -- Evidence spans proving the topic label is grounded in document text
+        CREATE TABLE IF NOT EXISTS topic_evidence(
+            evidence_id TEXT PRIMARY KEY,
+            topic_id TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            page INTEGER,
+            start INTEGER,
+            end INTEGER,
+            text TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_topic_evidence_topic_id ON topic_evidence(topic_id);
 
         -- -----------------------------
         -- Exams / users
@@ -177,6 +216,91 @@ class SQLiteDB:
             "UPDATE exams SET updated_at=? WHERE exam_id=?",
             (now, exam_id),
         )
+        self.conn.commit()
+
+    # -----------------------------
+    # Topic helpers
+    # -----------------------------
+    def upsert_topic(
+        self,
+        *,
+        topic_id: str,
+        exam_id: str,
+        label: str,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = json.dumps(info or {}, ensure_ascii=False)
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO topics(topic_id, exam_id, label, created_at, info) VALUES(?,?,?,?,?)",
+            (topic_id, exam_id, label, now, payload),
+        )
+        self.conn.commit()
+
+    def list_topics(self, *, exam_id: str) -> List[StoredTopic]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT topic_id, exam_id, label, created_at, info FROM topics WHERE exam_id=? ORDER BY created_at ASC",
+            (exam_id,),
+        )
+        rows = cur.fetchall()
+        out: List[StoredTopic] = []
+        for topic_id, exam_id_val, label, created_at, info_raw in rows:
+            try:
+                info = json.loads(info_raw) if isinstance(info_raw, str) and info_raw else {}
+            except Exception:
+                info = {}
+            out.append(
+                StoredTopic(
+                    topic_id=str(topic_id),
+                    exam_id=str(exam_id_val),
+                    label=str(label),
+                    created_at=str(created_at),
+                    info=info,
+                )
+            )
+        return out
+
+    def replace_topic_chunks(self, *, topic_id: str, chunk_ids: Sequence[str]) -> None:
+        ids = [c for c in chunk_ids if c]
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM topic_chunks WHERE topic_id=?", (topic_id,))
+        if ids:
+            rows = [(topic_id, cid) for cid in ids]
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO topic_chunks(topic_id, chunk_id) VALUES(?,?)",
+                rows,
+            )
+        self.conn.commit()
+
+    def replace_topic_evidence(
+        self,
+        *,
+        topic_id: str,
+        evidence: Sequence[Dict[str, Any]],
+    ) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM topic_evidence WHERE topic_id=?", (topic_id,))
+        rows = []
+        for ev in evidence:
+            evidence_id = ev.get("evidence_id") or uuid.uuid4().hex[:20]
+            rows.append(
+                (
+                    str(evidence_id),
+                    topic_id,
+                    str(ev.get("doc_id") or ""),
+                    int(ev.get("page") or 0),
+                    int(ev.get("start") or 0),
+                    int(ev.get("end") or 0),
+                    str(ev.get("text") or ""),
+                )
+            )
+        if rows:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO topic_evidence(evidence_id, topic_id, doc_id, page, start, end, text) "
+                "VALUES(?,?,?,?,?,?,?)",
+                rows,
+            )
         self.conn.commit()
 
     def get_exam(self, exam_id: str) -> Optional[StoredExam]:
@@ -321,6 +445,43 @@ class SQLiteDB:
                 return ch
         # Fallback for older DBs (pre-mapping)
         return self.get_chunk_by_index(vector_index)
+
+    def get_vector_index_by_chunk_id(self, chunk_id: str) -> Optional[int]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT vector_index FROM vector_index_map WHERE chunk_id=?",
+            (chunk_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
+
+    def list_vector_indices_by_chunk_ids(self, chunk_ids: Sequence[str]) -> Dict[str, int]:
+        """
+        Return mapping {chunk_id: vector_index} for any chunk_ids present in vector_index_map.
+        """
+        ids = [c for c in chunk_ids if c]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"SELECT chunk_id, vector_index FROM vector_index_map WHERE chunk_id IN ({placeholders})",
+            ids,
+        )
+        out: Dict[str, int] = {}
+        for ch_id, vec_idx in cur.fetchall():
+            if not ch_id:
+                continue
+            try:
+                out[str(ch_id)] = int(vec_idx)
+            except Exception:
+                continue
+        return out
 
     def get_chunk_by_index(self, index: int) -> Optional[StoredChunk]:
         """

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Sequence, Optional
 import numpy as np
 from app.data.db import SQLiteDB, StoredChunk
 
@@ -147,6 +147,51 @@ class VectorStore:
             
             out.append((chunk, float(score)))
         return out
+
+    def get_vectors_for_chunk_ids(self, chunk_ids: Sequence[str]) -> Tuple[List[str], np.ndarray]:
+        """
+        Fetch vectors (in embedding space) for the given chunk_ids.
+        Returns (resolved_chunk_ids_in_order, vectors[N, dim]).
+
+        Notes:
+        - Requires vector_index_map entries; for older stores, missing chunk_ids are skipped.
+        """
+        ids = [c for c in chunk_ids if c]
+        if not ids:
+            return [], np.zeros((0, self.vector_dimension), dtype="float32")
+        mapping = self.db.list_vector_indices_by_chunk_ids(ids)
+        resolved: List[Tuple[str, int]] = [(cid, mapping[cid]) for cid in ids if cid in mapping]
+        if not resolved:
+            return [], np.zeros((0, self.vector_dimension), dtype="float32")
+        resolved_chunk_ids = [cid for cid, _ in resolved]
+        indices = [idx for _, idx in resolved]
+
+        if _FAISS_AVAILABLE:
+            # Prefer batch reconstruction when available.
+            try:
+                if hasattr(self.index, "reconstruct_batch"):
+                    vecs = self.index.reconstruct_batch(np.array(indices, dtype="int64"))  # type: ignore
+                    return resolved_chunk_ids, np.array(vecs, dtype="float32", copy=False)
+            except Exception:
+                pass
+            # Fallback: reconstruct one-by-one.
+            out = np.zeros((len(indices), self.vector_dimension), dtype="float32")
+            for i, idx in enumerate(indices):
+                out[i] = np.array(self.index.reconstruct(int(idx)), dtype="float32")  # type: ignore
+            return resolved_chunk_ids, out
+
+        # Numpy fallback index stores vectors directly
+        vec_mat = getattr(self.index, "vectors", None)
+        if vec_mat is None:
+            return resolved_chunk_ids, np.zeros((0, self.vector_dimension), dtype="float32")
+        # Guard against out-of-range indices (shouldn't happen if mapping is correct).
+        max_n = int(vec_mat.shape[0])
+        safe_pairs: List[Tuple[str, int]] = [(cid, idx) for cid, idx in resolved if 0 <= idx < max_n]
+        if not safe_pairs:
+            return [], np.zeros((0, self.vector_dimension), dtype="float32")
+        resolved_chunk_ids = [cid for cid, _ in safe_pairs]
+        safe_indices = [idx for _, idx in safe_pairs]
+        return resolved_chunk_ids, np.array(vec_mat[safe_indices], dtype="float32", copy=False)
 
     # ------ doc helpers ------
     def list_chunks_by_doc(self, doc_id: str) -> List[StoredChunk]:
