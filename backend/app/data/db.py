@@ -297,6 +297,15 @@ class SQLiteDB:
             )
         self.conn.commit()
 
+    def list_chunk_ids_for_topic(self, *, topic_id: str) -> List[str]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT chunk_id FROM topic_chunks WHERE topic_id=?",
+            (topic_id,),
+        )
+        rows = cur.fetchall()
+        return [str(r[0]) for r in rows if r and r[0]]
+
     def replace_topic_evidence(
         self,
         *,

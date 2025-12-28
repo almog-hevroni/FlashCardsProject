@@ -150,12 +150,31 @@ def retrieve_with_proofs(
     store: Optional[VectorStore] = None,
     *,
     allowed_doc_ids: Optional[Sequence[str]] = None,
+    allowed_chunk_ids: Optional[Sequence[str]] = None,
 ) -> List[ProofSpan]:
     store = store or VectorStore()
-    hits = Retriever(store, k=k).search_smart(question, k=k) 
+    allowed_chunks = {c for c in (allowed_chunk_ids or []) if c} if allowed_chunk_ids else None
+    # If we need to filter by chunk_id, ask for a bigger pool first to avoid starving after filtering.
+    pool_k = k
+    if allowed_chunks is not None:
+        pool_k = min(max(k * 10, 50), 300)
+
+    hits = Retriever(store, k=pool_k).search_smart(question, k=pool_k)
     allowed = {d for d in allowed_doc_ids if d} if allowed_doc_ids else None
     if allowed:
         hits = [h for h in hits if h.chunk.doc_id in allowed]
+    if allowed_chunks is not None:
+        hits = [h for h in hits if h.chunk.chunk_id in allowed_chunks]
+        # If still short, try one more time with a bigger pool (still capped).
+        if len(hits) < k and pool_k < 600:
+            pool_k2 = min(max(pool_k * 2, 100), 600)
+            hits2 = Retriever(store, k=pool_k2).search_smart(question, k=pool_k2)
+            if allowed:
+                hits2 = [h for h in hits2 if h.chunk.doc_id in allowed]
+            hits2 = [h for h in hits2 if h.chunk.chunk_id in allowed_chunks]
+            hits = hits2
+
+    hits = hits[:k]
     return [ProofSpan(
         doc_id=h.chunk.doc_id, page=h.chunk.page, start=h.chunk.start,
         end=h.chunk.end, text=h.chunk.text, score=h.score

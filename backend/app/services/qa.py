@@ -248,6 +248,7 @@ def generate_answer(
     min_score: float = 0.4,
     model: str = CHAT_MODEL,
     allowed_doc_ids: Optional[Sequence[str]] = None,
+    allowed_chunk_ids: Optional[Sequence[str]] = None,
     store: Optional[VectorStore] = None,
     *,
     prefetched_pool: Optional[Sequence[ProofSpan]] = None,
@@ -272,6 +273,7 @@ def generate_answer(
             k=target_pool,
             store=store_obj,
             allowed_doc_ids=allowed_list,
+            allowed_chunk_ids=allowed_chunk_ids,
         )
     proofs_all = sorted(
         proofs_all,

@@ -26,6 +26,7 @@ def main():
     p.add_argument("--exam_id", help="existing exam id (to attach documents or inspect)")
     p.add_argument("--build_topics", action="store_true", help="build topics for --exam_id")
     p.add_argument("--topic_merge_threshold", type=float, default=0.88, help="merge topics if centroid similarity >= threshold (default 0.88)")
+    p.add_argument("--topic_id", help="optional: restrict --ask/--answer to this topic_id")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
     p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
@@ -82,11 +83,28 @@ def main():
             print(qa_out["report"])
 
     if args.ask:
-        proofs = retrieve_with_proofs(args.ask, k=args.k, store=store)
+        allowed_chunk_ids = None
+        if args.topic_id:
+            allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=args.topic_id)
+        proofs = retrieve_with_proofs(
+            args.ask,
+            k=args.k,
+            store=store,
+            allowed_chunk_ids=allowed_chunk_ids,
+        )
         print(json.dumps([p.model_dump() for p in proofs], ensure_ascii=False, indent=2))
 
     if args.answer:
-        ans = generate_answer(args.answer, k=args.k, min_score=args.min_score)
+        allowed_chunk_ids = None
+        if args.topic_id:
+            allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=args.topic_id)
+        ans = generate_answer(
+            args.answer,
+            k=args.k,
+            min_score=args.min_score,
+            store=store,
+            allowed_chunk_ids=allowed_chunk_ids,
+        )
         print("\n=== ANSWER ===\n")
         print(ans.answer)
         print("\n=== PROOFS ===\n")
