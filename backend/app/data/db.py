@@ -37,6 +37,18 @@ class StoredTopic:
     created_at: str
     info: Dict[str, Any]
 
+@dataclass
+class StoredCard:
+    card_id: str
+    exam_id: str
+    topic_id: str
+    question: str
+    answer: str
+    difficulty: int
+    created_at: str
+    status: str
+    info: Dict[str, Any]
+
 class SQLiteDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -121,6 +133,52 @@ class SQLiteDB:
             dim INTEGER NOT NULL,
             vector BLOB NOT NULL
         );
+
+        -- -----------------------------
+        -- Cards (flashcards) per exam/topic
+        -- -----------------------------
+        CREATE TABLE IF NOT EXISTS cards(
+            card_id TEXT PRIMARY KEY,
+            exam_id TEXT NOT NULL,
+            topic_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            difficulty INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            status TEXT NOT NULL DEFAULT 'active',
+            info TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cards_exam_id ON cards(exam_id);
+        CREATE INDEX IF NOT EXISTS idx_cards_topic_id ON cards(topic_id);
+        CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
+
+        -- Evidence/proofs attached to a card (similar structure to ProofSpan)
+        CREATE TABLE IF NOT EXISTS card_proofs(
+            proof_id TEXT PRIMARY KEY,
+            card_id TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            page INTEGER,
+            start INTEGER,
+            end INTEGER,
+            text TEXT NOT NULL,
+            score REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_proofs_card_id ON card_proofs(card_id);
+
+        -- User ratings / reviews (one-click buttons)
+        CREATE TABLE IF NOT EXISTS card_reviews(
+            review_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            exam_id TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            topic_id TEXT NOT NULL,
+            rating TEXT NOT NULL,
+            created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+            info TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_reviews_exam_id ON card_reviews(exam_id);
+        CREATE INDEX IF NOT EXISTS idx_card_reviews_card_id ON card_reviews(card_id);
+        CREATE INDEX IF NOT EXISTS idx_card_reviews_topic_id ON card_reviews(topic_id);
 
         -- -----------------------------
         -- Exams / users
@@ -387,6 +445,87 @@ class SQLiteDB:
             except Exception:
                 continue
         return out
+
+    # -----------------------------
+    # Card helpers
+    # -----------------------------
+    def upsert_card(
+        self,
+        *,
+        card_id: str,
+        exam_id: str,
+        topic_id: str,
+        question: str,
+        answer: str,
+        difficulty: int = 1,
+        status: str = "active",
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = json.dumps(info or {}, ensure_ascii=False)
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cards(card_id, exam_id, topic_id, question, answer, difficulty, created_at, status, info) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (card_id, exam_id, topic_id, question, answer, int(difficulty), now, status, payload),
+        )
+        self.conn.commit()
+
+    def replace_card_proofs(self, *, card_id: str, proofs: Sequence[Dict[str, Any]]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM card_proofs WHERE card_id=?", (card_id,))
+        rows = []
+        for p in proofs:
+            proof_id = p.get("proof_id") or uuid.uuid4().hex[:20]
+            rows.append(
+                (
+                    str(proof_id),
+                    card_id,
+                    str(p.get("doc_id") or ""),
+                    int(p.get("page") or 0),
+                    int(p.get("start") or 0),
+                    int(p.get("end") or 0),
+                    str(p.get("text") or ""),
+                    float(p.get("score") or 0.0),
+                )
+            )
+        if rows:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO card_proofs(proof_id, card_id, doc_id, page, start, end, text, score) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                rows,
+            )
+        self.conn.commit()
+
+    def list_cards_for_exam(self, *, exam_id: str, limit: int = 200) -> List[StoredCard]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT card_id, exam_id, topic_id, question, answer, difficulty, created_at, status, info "
+            "FROM cards WHERE exam_id=? ORDER BY created_at ASC LIMIT ?",
+            (exam_id, limit),
+        )
+        rows = cur.fetchall()
+        out: List[StoredCard] = []
+        for row in rows:
+            info_raw = row[8] or "{}"
+            try:
+                info = json.loads(info_raw) if isinstance(info_raw, str) else {}
+            except Exception:
+                info = {}
+            out.append(
+                StoredCard(
+                    card_id=str(row[0]),
+                    exam_id=str(row[1]),
+                    topic_id=str(row[2]),
+                    question=str(row[3]),
+                    answer=str(row[4]),
+                    difficulty=int(row[5] or 1),
+                    created_at=str(row[6]),
+                    status=str(row[7] or "active"),
+                    info=info,
+                )
+            )
+        return out
+
 
     def replace_topic_evidence(
         self,

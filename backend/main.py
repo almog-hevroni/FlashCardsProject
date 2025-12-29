@@ -16,6 +16,7 @@ from app.services.graph import run_generate_qa
 from app.services.exams import create_exam, load_exam, attach_documents, log_event
 from app.services.topics import build_topics_for_exam, list_topics_for_exam
 from app.services.routing import answer_in_exam, route_question_to_topic
+from app.services.cards import generate_starter_cards
 
 def main():
     p = argparse.ArgumentParser()
@@ -29,6 +30,7 @@ def main():
     p.add_argument("--topic_merge_threshold", type=float, default=0.88, help="merge topics if centroid similarity >= threshold (default 0.88)")
     p.add_argument("--topic_id", help="optional: restrict --ask/--answer to this topic_id")
     p.add_argument("--auto_topic", action="store_true", help="auto-route question to topic within --exam_id (for --answer)")
+    p.add_argument("--gen_starter_cards", action="store_true", help="generate starter flashcards for --exam_id (requires topics)")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
     p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
@@ -37,6 +39,23 @@ def main():
     args = p.parse_args()
 
     store = VectorStore()
+
+    if args.gen_starter_cards:
+        if not args.exam_id:
+            raise SystemExit("--gen_starter_cards requires --exam_id")
+        cards = generate_starter_cards(
+            exam_id=args.exam_id,
+            user_id=args.user_id,
+            store=store,
+            n=5,
+            difficulty=1,
+        )
+        print(f"Generated {len(cards)} starter card(s) for exam_id={args.exam_id}")
+        for c in cards:
+            print(f"\n- card_id={c.card_id} topic={c.topic_label} ({c.topic_id})")
+            print(f"  Q: {c.question}")
+            print(f"  A: {c.answer}")
+        return
 
     if args.build_topics:
         if not args.exam_id:

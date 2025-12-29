@@ -8,6 +8,7 @@ import numpy as np
 from app.data.vector_store import VectorStore
 from app.services.llm import embed_query
 from app.services.qa import generate_answer, AnswerWithCitations
+from app.utils.vectors import l2_normalize
 
 
 @dataclass
@@ -17,24 +18,14 @@ class TopicRoute:
     score: float
 
 
-def _l2_normalize(v: np.ndarray) -> np.ndarray:
-    if v.size == 0:
-        return v
-    if v.ndim == 1:
-        v = v[None, :]
-    norms = np.linalg.norm(v, axis=1, keepdims=True)
-    norms = np.clip(norms, 1e-12, None)
-    return (v / norms).astype("float32", copy=False)
-
-
 def _topic_centroid_for_chunk_ids(store: VectorStore, chunk_ids: List[str]) -> Optional[np.ndarray]:
     # Reconstruct vectors for the topic's chunks and compute a centroid.
     resolved, X = store.get_vectors_for_chunk_ids(chunk_ids)
     if X.size == 0 or not resolved:
         return None
-    Xn = _l2_normalize(X)
+    Xn = l2_normalize(X)
     centroid = np.mean(Xn, axis=0, keepdims=True)
-    return _l2_normalize(centroid)[0]
+    return l2_normalize(centroid)[0]
 
 
 def route_question_to_topic(
@@ -75,7 +66,7 @@ def route_question_to_topic(
         q = question_vec.astype("float32", copy=False)
         if q.ndim == 1:
             q = q[None, :]
-    q = _l2_normalize(q)[0]
+    q = l2_normalize(q)[0]
 
     scored: List[TopicRoute] = []
     for topic_id, c in centroids.items():

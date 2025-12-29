@@ -12,6 +12,8 @@ from app.data.db import StoredChunk, StoredTopic
 from app.data.vector_store import VectorStore
 from app.services.exams import load_exam
 from app.services.llm import CHAT_MODEL_FAST, chat_completions_create
+from app.utils.vectors import l2_normalize
+from app.services.context_packs import build_representative_chunk_pack
 
 
 _STOPWORDS = {
@@ -31,14 +33,6 @@ class BuiltTopic:
     chunk_ids: List[str]
     evidence: List[Dict[str, Any]]
     info: Dict[str, Any]
-
-
-def _l2_normalize(x: np.ndarray) -> np.ndarray:
-    if x.size == 0:
-        return x
-    norms = np.linalg.norm(x, axis=1, keepdims=True)
-    norms = np.clip(norms, 1e-12, None)
-    return (x / norms).astype("float32", copy=False)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -141,58 +135,6 @@ def _extract_evidence_for_phrases(
     return [], None
 
 
-def _build_cluster_context_pack(
-    *,
-    cids: Sequence[str],
-    chunk_by_id: Dict[str, StoredChunk],
-    Xn: np.ndarray,
-    id_to_row: Dict[str, int],
-    max_chunks: int = 8,
-    max_chars_per_chunk: int = 650,
-    max_total_chars: int = 6000,
-) -> str:
-    """
-    Build a compact context pack from the most representative chunks in a cluster.
-    Representative = highest cosine similarity to cluster centroid (on normalized embeddings).
-    """
-    rows: List[int] = []
-    kept_ids: List[str] = []
-    for cid in cids:
-        r = id_to_row.get(cid)
-        if r is None:
-            continue
-        rows.append(int(r))
-        kept_ids.append(cid)
-    if not rows:
-        return ""
-
-    V = Xn[rows]
-    centroid = np.mean(V, axis=0, keepdims=True).astype("float32", copy=False)
-    centroid = _l2_normalize(centroid)[0]
-    sims = (V @ centroid).tolist()
-    ranked = sorted(zip(kept_ids, sims), key=lambda t: t[1], reverse=True)
-
-    buf: List[str] = []
-    used = 0
-    picked = 0
-    for cid, sim in ranked:
-        ch = chunk_by_id.get(cid)
-        if not ch or not ch.text:
-            continue
-        text = ch.text.strip().replace("\n", " ")
-        if len(text) > max_chars_per_chunk:
-            text = text[: max_chars_per_chunk - 3].rstrip() + "..."
-        block = f"[doc={ch.doc_id} page={ch.page} sim={sim:.2f}] {text}\n"
-        if used + len(block) > max_total_chars:
-            break
-        buf.append(block)
-        used += len(block)
-        picked += 1
-        if picked >= max_chunks:
-            break
-    return "".join(buf).strip()
-
-
 def _llm_label_cluster(
     *,
     context_pack: str,
@@ -266,11 +208,11 @@ def _kmeans_cluster(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
         import faiss  # type: ignore
 
         # FAISS KMeans supports cosine-ish via normalized vectors + IndexFlatIP assignment.
-        Xn = _l2_normalize(X.astype("float32", copy=False))
+        Xn = l2_normalize(X.astype("float32", copy=False))
         km = faiss.Kmeans(d, k, niter=25, verbose=False, seed=seed)  # type: ignore
         km.train(Xn)  # type: ignore
         centroids = km.centroids  # type: ignore
-        centroids = _l2_normalize(np.array(centroids, dtype="float32", copy=False))
+        centroids = l2_normalize(np.array(centroids, dtype="float32", copy=False))
         sims = Xn @ centroids.T
         return np.argmax(sims, axis=1).astype("int64")
     except Exception:
@@ -278,7 +220,7 @@ def _kmeans_cluster(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
 
     # Numpy fallback (small datasets): classic kmeans on normalized vectors.
     rng = np.random.RandomState(seed)
-    Xn = _l2_normalize(X.astype("float32", copy=False))
+    Xn = l2_normalize(X.astype("float32", copy=False))
     # init: pick k random points
     centroids = Xn[rng.choice(n, size=k, replace=False)].copy()
     for _ in range(20):
@@ -290,7 +232,7 @@ def _kmeans_cluster(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
             if not np.any(mask):
                 new_centroids[j] = Xn[rng.randint(0, n)]
                 continue
-            new_centroids[j] = _l2_normalize(np.mean(Xn[mask], axis=0, keepdims=True))[0]
+            new_centroids[j] = l2_normalize(np.mean(Xn[mask], axis=0, keepdims=True))[0]
         if np.allclose(new_centroids, centroids, atol=1e-4):
             break
         centroids = new_centroids
@@ -335,7 +277,7 @@ def _merge_clusters_by_centroid(
         if not rows:
             continue
         V = Xn[rows]
-        centroid = _l2_normalize(np.mean(V, axis=0, keepdims=True))[0]
+        centroid = l2_normalize(np.mean(V, axis=0, keepdims=True))[0]
         items.append(
             {
                 "cluster_ids": [int(cluster_id)],
@@ -372,7 +314,7 @@ def _merge_clusters_by_centroid(
             rows = [id_to_row[cid] for cid in target["chunk_ids"] if cid in id_to_row]
             if rows:
                 V = Xn[rows]
-                target["centroid"] = _l2_normalize(np.mean(V, axis=0, keepdims=True))[0]
+                target["centroid"] = l2_normalize(np.mean(V, axis=0, keepdims=True))[0]
         else:
             kept.append(it)
 
@@ -425,7 +367,7 @@ def build_topics_for_exam(
         return []
     id_to_row = {cid: i for i, cid in enumerate(resolved_ids)}
     # Normalize once and reuse everywhere (merging, context pack selection, centroid persistence).
-    Xn = _l2_normalize(X.astype("float32", copy=False))
+    Xn = l2_normalize(X.astype("float32", copy=False))
 
     # 3) cluster
     k = min(_pick_k(len(resolved_ids)), len(resolved_ids))
@@ -455,11 +397,13 @@ def build_topics_for_exam(
         label_source = "ngram"
 
         if use_llm_labels:
-            context_pack = _build_cluster_context_pack(
-                cids=cids,
-                chunk_by_id=chunk_by_id,
+            context_pack = build_representative_chunk_pack(
+                store=store,
+                chunk_ids=cids,
+                centroid=merged.get("centroid"),
                 Xn=Xn,
                 id_to_row=id_to_row,
+                chunk_by_id=chunk_by_id,
             )
             if context_pack:
                 llm_out = _llm_label_cluster(context_pack=context_pack, model=llm_model)
@@ -483,7 +427,7 @@ def build_topics_for_exam(
         # Persist a centroid vector for routing: mean of normalized chunk vectors in this topic.
         rows = [id_to_row[cid] for cid in cids if cid in id_to_row]
         if rows:
-            centroid = _l2_normalize(np.mean(Xn[rows], axis=0, keepdims=True))[0]
+            centroid = l2_normalize(np.mean(Xn[rows], axis=0, keepdims=True))[0]
             try:
                 store.db.upsert_topic_vector(topic_id=topic_id, vector=centroid)
             except Exception:
