@@ -253,6 +253,7 @@ def generate_answer(
     *,
     prefetched_pool: Optional[Sequence[ProofSpan]] = None,
     pool_k: Optional[int] = None,
+    query_vec: Optional[np.ndarray] = None,
 ) -> AnswerWithCitations:
     """
     Retrieve top-k proofs, filter by score, then ask the LLM to answer using only those proofs.
@@ -274,6 +275,7 @@ def generate_answer(
             store=store_obj,
             allowed_doc_ids=allowed_list,
             allowed_chunk_ids=allowed_chunk_ids,
+            query_vec=query_vec,
         )
     proofs_all = sorted(
         proofs_all,

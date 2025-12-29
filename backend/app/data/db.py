@@ -115,6 +115,13 @@ class SQLiteDB:
         );
         CREATE INDEX IF NOT EXISTS idx_topic_evidence_topic_id ON topic_evidence(topic_id);
 
+        -- Topic centroid vectors for fast routing (float32 blob)
+        CREATE TABLE IF NOT EXISTS topic_vectors(
+            topic_id TEXT PRIMARY KEY,
+            dim INTEGER NOT NULL,
+            vector BLOB NOT NULL
+        );
+
         -- -----------------------------
         -- Exams / users
         -- -----------------------------
@@ -280,6 +287,10 @@ class SQLiteDB:
             topic_ids,
         )
         cur.execute(
+            f"DELETE FROM topic_vectors WHERE topic_id IN ({placeholders})",
+            topic_ids,
+        )
+        cur.execute(
             "DELETE FROM topics WHERE exam_id=?",
             (exam_id,),
         )
@@ -305,6 +316,77 @@ class SQLiteDB:
         )
         rows = cur.fetchall()
         return [str(r[0]) for r in rows if r and r[0]]
+
+    def list_topic_chunks_for_exam(self, *, exam_id: str) -> Dict[str, List[str]]:
+        """
+        Batch helper: returns {topic_id: [chunk_id, ...]} for all topics in an exam.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT tc.topic_id, tc.chunk_id "
+            "FROM topic_chunks tc "
+            "JOIN topics t ON t.topic_id = tc.topic_id "
+            "WHERE t.exam_id=?",
+            (exam_id,),
+        )
+        out: Dict[str, List[str]] = {}
+        for topic_id, chunk_id in cur.fetchall():
+            if not topic_id or not chunk_id:
+                continue
+            out.setdefault(str(topic_id), []).append(str(chunk_id))
+        return out
+
+    # -----------------------------
+    # Topic vector helpers (centroids)
+    # -----------------------------
+    def upsert_topic_vector(self, *, topic_id: str, vector: np.ndarray) -> None:
+        arr = vector.astype("float32", copy=False).reshape(-1)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO topic_vectors(topic_id, dim, vector) VALUES(?,?,?)",
+            (topic_id, int(arr.size), arr.tobytes()),
+        )
+        self.conn.commit()
+
+    def get_topic_vector(self, *, topic_id: str) -> Optional[np.ndarray]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT dim, vector FROM topic_vectors WHERE topic_id=?",
+            (topic_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        dim, blob = row
+        try:
+            arr = np.frombuffer(blob, dtype="float32")
+            if int(dim) != int(arr.size):
+                return None
+            return arr
+        except Exception:
+            return None
+
+    def list_topic_vectors_for_exam(self, *, exam_id: str) -> Dict[str, np.ndarray]:
+        """
+        Return mapping {topic_id: vector(float32[dim])} for topics in an exam.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT t.topic_id, v.dim, v.vector "
+            "FROM topic_vectors v "
+            "JOIN topics t ON t.topic_id = v.topic_id "
+            "WHERE t.exam_id=?",
+            (exam_id,),
+        )
+        out: Dict[str, np.ndarray] = {}
+        for topic_id, dim, blob in cur.fetchall():
+            try:
+                arr = np.frombuffer(blob, dtype="float32")
+                if int(dim) != int(arr.size):
+                    continue
+                out[str(topic_id)] = arr
+            except Exception:
+                continue
+        return out
 
     def replace_topic_evidence(
         self,

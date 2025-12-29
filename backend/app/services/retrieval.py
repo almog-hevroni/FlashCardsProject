@@ -46,12 +46,12 @@ class Retriever:
         self.store = store
         self.k = k
 
-    def search(self, query: str) -> List[Retrieval]:
-        qvec = embed_query(query)
+    def search(self, query: str, *, query_vec: Optional[np.ndarray] = None) -> List[Retrieval]:
+        qvec = query_vec if query_vec is not None else embed_query(query)
         hits = self.store.topk(qvec, self.k)
         return [Retrieval(chunk=h[0], score=h[1]) for h in hits]
 
-    def search_smart(self, query: str, k: Optional[int] = None) -> List[Retrieval]:
+    def search_smart(self, query: str, k: Optional[int] = None, *, query_vec: Optional[np.ndarray] = None) -> List[Retrieval]:
         """
         Multi-query + diversification + LLM reranking pipeline:
         1) Generate alternate queries to improve recall
@@ -74,7 +74,10 @@ class Retriever:
         # 2) retrieve per alternate and merge
         per_chunk: Dict[str, Tuple[StoredChunk, float]] = {}
         for q in alternates:
-            qvec = embed_query(q)
+            if query_vec is not None and q == query:
+                qvec = query_vec
+            else:
+                qvec = embed_query(q)
             hits = self.store.topk(qvec, k_pool)
             for ch, score in hits:
                 # keep the best vector score per chunk_id
@@ -96,7 +99,7 @@ class Retriever:
             # L2 normalize
             norms = np.linalg.norm(cand_emb, axis=1, keepdims=True).clip(1e-12)
             cand_emb = cand_emb / norms
-            q_vec = embed_query(query).astype("float32")
+            q_vec = (query_vec if query_vec is not None else embed_query(query)).astype("float32")
             q_vec = q_vec / np.linalg.norm(q_vec, axis=1, keepdims=True).clip(1e-12)
             sim_to_q = (cand_emb @ q_vec[0])
 
@@ -151,6 +154,7 @@ def retrieve_with_proofs(
     *,
     allowed_doc_ids: Optional[Sequence[str]] = None,
     allowed_chunk_ids: Optional[Sequence[str]] = None,
+    query_vec: Optional[np.ndarray] = None,
 ) -> List[ProofSpan]:
     store = store or VectorStore()
     allowed_chunks = {c for c in (allowed_chunk_ids or []) if c} if allowed_chunk_ids else None
@@ -159,7 +163,7 @@ def retrieve_with_proofs(
     if allowed_chunks is not None:
         pool_k = min(max(k * 10, 50), 300)
 
-    hits = Retriever(store, k=pool_k).search_smart(question, k=pool_k)
+    hits = Retriever(store, k=pool_k).search_smart(question, k=pool_k, query_vec=query_vec)
     allowed = {d for d in allowed_doc_ids if d} if allowed_doc_ids else None
     if allowed:
         hits = [h for h in hits if h.chunk.doc_id in allowed]
@@ -168,7 +172,7 @@ def retrieve_with_proofs(
         # If still short, try one more time with a bigger pool (still capped).
         if len(hits) < k and pool_k < 600:
             pool_k2 = min(max(pool_k * 2, 100), 600)
-            hits2 = Retriever(store, k=pool_k2).search_smart(question, k=pool_k2)
+            hits2 = Retriever(store, k=pool_k2).search_smart(question, k=pool_k2, query_vec=query_vec)
             if allowed:
                 hits2 = [h for h in hits2 if h.chunk.doc_id in allowed]
             hits2 = [h for h in hits2 if h.chunk.chunk_id in allowed_chunks]

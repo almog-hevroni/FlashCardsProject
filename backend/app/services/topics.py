@@ -145,7 +145,7 @@ def _build_cluster_context_pack(
     *,
     cids: Sequence[str],
     chunk_by_id: Dict[str, StoredChunk],
-    X: np.ndarray,
+    Xn: np.ndarray,
     id_to_row: Dict[str, int],
     max_chunks: int = 8,
     max_chars_per_chunk: int = 650,
@@ -166,7 +166,6 @@ def _build_cluster_context_pack(
     if not rows:
         return ""
 
-    Xn = _l2_normalize(X.astype("float32", copy=False))
     V = Xn[rows]
     centroid = np.mean(V, axis=0, keepdims=True).astype("float32", copy=False)
     centroid = _l2_normalize(centroid)[0]
@@ -312,7 +311,7 @@ def _pick_k(num_chunks: int) -> int:
 def _merge_clusters_by_centroid(
     *,
     clusters: List[tuple[int, List[str]]],
-    X: np.ndarray,
+    Xn: np.ndarray,
     id_to_row: Dict[str, int],
     threshold: float = 0.90,
 ) -> List[Dict[str, Any]]:
@@ -328,8 +327,6 @@ def _merge_clusters_by_centroid(
     """
     if not clusters:
         return []
-    # Normalize vectors once for cosine similarity.
-    Xn = _l2_normalize(X.astype("float32", copy=False))
 
     # Build centroid per cluster (on Xn).
     items: List[Dict[str, Any]] = []
@@ -427,6 +424,8 @@ def build_topics_for_exam(
     if X.size == 0 or not resolved_ids:
         return []
     id_to_row = {cid: i for i, cid in enumerate(resolved_ids)}
+    # Normalize once and reuse everywhere (merging, context pack selection, centroid persistence).
+    Xn = _l2_normalize(X.astype("float32", copy=False))
 
     # 3) cluster
     k = min(_pick_k(len(resolved_ids)), len(resolved_ids))
@@ -441,7 +440,7 @@ def build_topics_for_exam(
     # 3.5) merge near-duplicate clusters by centroid similarity (cheap redundancy reduction)
     merged_clusters = _merge_clusters_by_centroid(
         clusters=clusters,
-        X=X,
+        Xn=Xn,
         id_to_row=id_to_row,
         threshold=merge_threshold,
     )
@@ -459,7 +458,7 @@ def build_topics_for_exam(
             context_pack = _build_cluster_context_pack(
                 cids=cids,
                 chunk_by_id=chunk_by_id,
-                X=X,
+                Xn=Xn,
                 id_to_row=id_to_row,
             )
             if context_pack:
@@ -481,6 +480,14 @@ def build_topics_for_exam(
                 label = _choose_grounded_label(texts, max_words=1)
                 evidence = _extract_evidence_for_label(c_chunks, label)
         topic_id = uuid.uuid4().hex[:16]
+        # Persist a centroid vector for routing: mean of normalized chunk vectors in this topic.
+        rows = [id_to_row[cid] for cid in cids if cid in id_to_row]
+        if rows:
+            centroid = _l2_normalize(np.mean(Xn[rows], axis=0, keepdims=True))[0]
+            try:
+                store.db.upsert_topic_vector(topic_id=topic_id, vector=centroid)
+            except Exception:
+                pass
         info = {
             "n_chunks": len(cids),
             "method": "kmeans_embeddings",

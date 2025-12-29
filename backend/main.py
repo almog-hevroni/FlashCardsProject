@@ -15,6 +15,7 @@ from app.services.qa import generate_answer
 from app.services.graph import run_generate_qa
 from app.services.exams import create_exam, load_exam, attach_documents, log_event
 from app.services.topics import build_topics_for_exam, list_topics_for_exam
+from app.services.routing import answer_in_exam, route_question_to_topic
 
 def main():
     p = argparse.ArgumentParser()
@@ -27,6 +28,7 @@ def main():
     p.add_argument("--build_topics", action="store_true", help="build topics for --exam_id")
     p.add_argument("--topic_merge_threshold", type=float, default=0.88, help="merge topics if centroid similarity >= threshold (default 0.88)")
     p.add_argument("--topic_id", help="optional: restrict --ask/--answer to this topic_id")
+    p.add_argument("--auto_topic", action="store_true", help="auto-route question to topic within --exam_id (for --answer)")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
     p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
@@ -95,6 +97,30 @@ def main():
         print(json.dumps([p.model_dump() for p in proofs], ensure_ascii=False, indent=2))
 
     if args.answer:
+        if args.auto_topic:
+            if not args.exam_id:
+                raise SystemExit("--auto_topic requires --exam_id")
+            ans, routes = answer_in_exam(
+                exam_id=args.exam_id,
+                question=args.answer,
+                store=store,
+                k=args.k,
+                min_score=args.min_score,
+                top_n_topics=1,
+            )
+            if routes:
+                r0 = routes[0]
+                print(f"\n=== ROUTED TOPIC ===\n{r0.topic_id}: {r0.label} (score={r0.score:.3f})\n")
+            print("\n=== ANSWER ===\n")
+            print(ans.answer)
+            print("\n=== PROOFS ===\n")
+            for i, p in enumerate(ans.proofs, 1):
+                print(f"S{i} | doc={p.doc_id} page={p.page} score={p.score:.2f}")
+                text = " ".join(p.text.split())
+                print(f"\"{text}\"")
+                print()
+            return
+
         allowed_chunk_ids = None
         if args.topic_id:
             allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=args.topic_id)
