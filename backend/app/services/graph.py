@@ -1,85 +1,64 @@
+"""
+Card Generation LangGraph Flow
+
+Topic-scoped, difficulty-aware card generation with:
+- FAISS-based question deduplication (exam-scoped)
+- Bloom's taxonomy difficulty levels
+- Robust retry logic (full restart on persistent failures)
+"""
+
 from typing import Any, Dict, List, Optional, Sequence, TypedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
-import os
-import time
+import uuid
 import numpy as np
 from langgraph.graph import StateGraph, END
-from app.data.cache import DocContextSummaryCache
-from app.services.llm import chat_completions_create, client, CHAT_MODEL, CHAT_MODEL_FAST, embed_texts
-from app.services.qa import AnswerWithCitations, generate_answer
-from app.data.vector_store import VectorStore
+
+from app.data.vector_store import VectorStore, QuestionIndex
+from app.services.llm import (
+    chat_completions_create,
+    CHAT_MODEL,
+    CHAT_MODEL_FAST,
+    embed_texts,
+)
+from app.services.qa import generate_answer
+from app.services.cards import (
+    GeneratedCard,
+    generate_question_at_difficulty,
+    pick_starter_topics,
+    DIFFICULTY_LEVELS,
+)
+from app.services.context_packs import build_diverse_chunk_pack
 from app.api.schemas import ProofSpan
-from app.services.retrieval import retrieve_with_proofs
 
 logger = logging.getLogger(__name__)
 
-# ------------- State -------------
+# ------------- Configuration -------------
 
-class QAItem(TypedDict, total=False):
-    question: str
-    answer: str
-    proofs: List[Dict[str, Any]]
-    question_score: float
-    answer_score: float
-    forced: bool
-    critique: str
+DEFAULT_CONFIG = {
+    "max_question_attempts": 3,
+    "max_answer_attempts": 3,
+    "max_full_restarts": 5,
+    "uniqueness_threshold": 0.85,
+    "validation_threshold": 0.7,
+    "initial_k": 8,
+    "initial_min_score": 0.4,
+    "strengthen_k_delta": 2,
+    "strengthen_min_score_delta": 0.05,
+}
 
-class State(TypedDict):
-    doc_ids: List[str]
-    store_basepath: str
-    k: int
-    min_score: float
-    target_n: int
-    attempts: int
-    max_attempts: int
-    questions: List[str]
-    question_scores: List[float]
-    current_index: int
-    qa: List[QAItem]
-    working_answer: Optional[str]
-    working_proofs: Optional[List[ProofSpan]]
-    working_score: Optional[float]
-    working_answer_critique: Optional[str]
-    last_critique: Optional[str]
-    summary: str
-    retrieval_cache: Dict[int, Dict[str, Any]]
-
-# ------------- Helpers -------------
-
-def _openai():
-    return client()
-
-def _sample_doc_context(
-    store: VectorStore,
-    doc_ids: Sequence[str],
-    n: int = 20,
-    seed: Optional[int] = None,
-) -> str:
-    if not doc_ids:
-        return ""
-    import random
-    rng = random.Random(seed) if seed is not None else random
-    pooled = []
-    for doc_id in doc_ids:
-        pooled.extend(store.sample_chunks_by_doc(doc_id, n=n))
-    if not pooled:
-        return ""
-    rng.shuffle(pooled)
-    selected = pooled[:n]
-    buf = []
-    for c in selected:
-        buf.append(f"Page {c.page}\n{c.text.strip()}\n")
-    return "\n\n".join(buf)[:12000]
+# ------------- Helpers (kept from old implementation) -------------
 
 
 def _hash_text(text: str) -> str:
+    """Hash text for embedding cache key."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _embed_with_store_cache(texts: List[str], store: VectorStore) -> np.ndarray:
+    """Embed texts using the store's embedding cache."""
     if not texts:
         return np.zeros((0, store.vector_dimension), dtype="float32")
     hashes = [_hash_text(t) for t in texts]
@@ -95,287 +74,11 @@ def _embed_with_store_cache(texts: List[str], store: VectorStore) -> np.ndarray:
     return vectors
 
 
-def _get_context_and_summary(store: VectorStore, doc_ids: Sequence[str], basepath: str) -> tuple[str, str]:
-    cache = DocContextSummaryCache(basepath)
-    contexts: List[str] = []
-    summaries: List[str] = []
-    for doc_id in doc_ids:
-        cached = cache.get(doc_id)
-        if cached:
-            context = cached.get("context", "")
-            summary = cached.get("summary", "")
-        else:
-            seed = int(_hash_text(doc_id), 16) % (2**32)
-            context = _sample_doc_context(store, [doc_id], n=24, seed=seed)
-            summary = _summarize_context(context)
-            cache.set(doc_id, context, summary)
-        if context:
-            contexts.append(context)
-        if summary:
-            summaries.append(summary)
-    combined_context = "\n\n".join(contexts)[:12000]
-    combined_summary = "\n\n".join(summaries) or "Summary unavailable"
-    return combined_context, combined_summary
-
-
-def _get_or_build_retrieval_pool(
-    question: str,
-    doc_ids: Sequence[str],
-    store: VectorStore,
-    desired_pool: int,
-    cache_entry: Optional[Dict[str, Any]],
-) -> tuple[List[ProofSpan], Dict[str, Any]]:
-    allowed = set(doc_ids or [])
-    cached_pool: Optional[List[ProofSpan]] = None
-    if cache_entry:
-        pool = cache_entry.get("pool")
-        pool_size = cache_entry.get("pool_size", len(pool) if isinstance(pool, list) else 0)
-        if isinstance(pool, list) and pool_size >= desired_pool:
-            cached_pool = pool
-    if cached_pool is not None:
-        return cached_pool, dict(cache_entry or {"pool": cached_pool, "pool_size": desired_pool})
-
-    hits = retrieve_with_proofs(question, k=desired_pool, store=store)
-    if allowed:
-        hits = [h for h in hits if h.doc_id in allowed]
-    new_entry = {"pool": hits, "pool_size": desired_pool}
-    return hits, new_entry
-
-
-FAST_MODEL = CHAT_MODEL_FAST
-
-def _summarize_context(context: str) -> str:
-    prompt = (
-        "Read the document excerpt below and summarize the primary topics, goals, and insights "
-        "that a learner should focus on. Ignore side anecdotes or illustrative examples that are not central.\n\n"
-        f"CONTEXT:\n{context}"
-    )
-    resp = chat_completions_create(
-        model=FAST_MODEL,
-        messages=[
-            {"role": "system", "content": "You write concise study guides."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
-        max_tokens=250,
-    )
-    text = resp.choices[0].message.content or ""
-    return text.strip()
-
-def _propose_questions_from_context(context: str, summary: str, n: int = 6) -> List[str]:
-    prompt = (
-        "You are designing study questions strictly about the document described below.\n\n"
-        f"DOCUMENT SUMMARY:\n{summary}\n\n"
-        "DOCUMENT EXCERPT:\n"
-        f"{context}\n\n"
-        f"Produce {n} distinct, high-impact questions that help a learner internalize the main concepts, findings, "
-        "methods, and implications. Follow the rules:\n"
-        "- Focus on the primary themes from the summary; ignore tangential anecdotes or passing examples.\n"
-        "- Prefer questions that require understanding relationships, reasoning, or key arguments over rote facts.\n"
-        "- Avoid redundant or near-duplicate questions.\n"
-        "- Avoid questions that could be answered without reading the document, or that reference minor illustrations.\n"
-        "Return exactly one question per line, with no numbering or bullet characters."
-    )
-    resp = chat_completions_create(
-        model=FAST_MODEL,
-        messages=[
-            {"role": "system", "content": "You write excellent study questions."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.4,
-        max_tokens=350,
-    )
-    text = resp.choices[0].message.content or ""
-    qs = [q.strip() for q in text.splitlines() if q.strip()]
-    if len(qs) > n:
-        qs = qs[:n]
-    return qs
-
-def _dedupe_questions(
-    questions: List[str],
-    threshold: float = 0.85,
-    store: Optional[VectorStore] = None,
-) -> List[str]:
-    if len(questions) <= 1:
-        return questions
-    try:
-        if store:
-            vecs = _embed_with_store_cache(questions, store) #Faiss embedding cache
-        else:
-            vecs = embed_texts(questions) #OpenAI embedding
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True) #L2 normalization - Euclidean norm
-        vecs = vecs / np.clip(norms, 1e-12, None) #Normalized vectors for cosine similarity
-        kept: List[str] = [] 
-        kept_indices: List[int] = [] 
-        for i, q in enumerate(questions): #Deduplication
-            if not kept_indices:
-                kept.append(q)
-                kept_indices.append(i)
-                continue
-            sims = vecs[i][kept_indices] #Cosine similarity between the question and the kept questions
-            if sims.size > 0 and np.max(sims) >= threshold: #If the cosine similarity is greater than the threshold, skip the question
-                continue
-            kept.append(q)
-            kept_indices.append(i)
-        return kept
-    except Exception:
-        seen = set()
-        unique = []
-        for q in questions:
-            key = q.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(q)
-        return unique
-
-def _build_question_pool(
-    raw_questions: List[str],
-    target_count: int,
-    store: Optional[VectorStore] = None,
-) -> List[str]:
-    """
-    Ensure we have at least target_count question candidates.
-    Start with aggressive deduplication and gradually relax if we fall short.
-    """
-    cleaned = [q.strip() for q in raw_questions if q.strip()]
-    if target_count <= 0:
-        return []
-    if not cleaned:
-        return []
-    thresholds = [0.85, 0.9, 0.93, 0.97, 0.99]
-    for thresh in thresholds:
-        deduped = _dedupe_questions(cleaned, threshold=thresh, store=store)
-        if len(deduped) >= target_count:
-            return deduped
-    deduped = _dedupe_questions(cleaned, threshold=0.99, store=store)
-    seen_lower = {q.lower() for q in deduped}
-    for q in cleaned: 
-        if len(deduped) >= target_count: #If the deduplicated list is already the target count, break
-            break
-        key = q.lower()
-        if key in seen_lower: #If the question is already in the deduplicated list, skip it
-            continue
-        deduped.append(q)
-        seen_lower.add(key)
-    if len(deduped) < target_count:
-        idx = 0
-        while len(deduped) < target_count:
-            deduped.append(cleaned[idx % len(cleaned)])
-            idx += 1
-    return deduped[:max(target_count, len(deduped))]
-
-def _score_questions(context: str, summary: str, questions: List[str]) -> List[Dict[str, Any]]:
-    if not questions:
-        return []
-    payload = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
-    prompt = (
-        "Document summary:\n"
-        f"{summary}\n\n"
-        "Document excerpt:\n"
-        f"{context}\n\n"
-        "Questions to evaluate:\n"
-        f"{payload}\n\n"
-        "For each question, evaluate:\n"
-        "1. Centrality: Does it target the main ideas, methods, or findings described in the summary?\n"
-        "2. Educational value: Will answering it deepen understanding of the document's core content?\n"
-        "3. Redundancy: Is it meaningfully different from the other questions listed?\n\n"
-        "Return a JSON array with one object per question, in order, using this schema:\n"
-        '[{"score": <float 0-1>, "central": <true/false>, "reason": "<short explanation>"}]\n'
-        "Score near 0 if a question is primarily about tangential examples or trivia.\n"
-        "Respond with JSON only."
-    )
-    resp = chat_completions_create(
-        model=FAST_MODEL,
-        messages=[
-            {"role": "system", "content": "You are a rigorous evaluator."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-        max_tokens=400,
-    )
-    raw = resp.choices[0].message.content or "[]"
-    try:
-        data = json.loads(raw)
-        if not isinstance(data, list):
-            data = []
-    except Exception:
-        data = []
-    out: List[Dict[str, Any]] = []
-    for i in range(len(questions)):
-        item = {"score": 0.5, "central": True, "reason": ""}
-        try:
-            entry = data[i]
-            if isinstance(entry, dict):
-                if "score" in entry:
-                    item["score"] = float(entry["score"])
-                if "central" in entry:
-                    item["central"] = bool(entry["central"])
-                if "reason" in entry:
-                    item["reason"] = str(entry["reason"])
-        except Exception:
-            pass
-        out.append(item)
-    return out
-
-def _select_questions(questions: List[str], evaluations: List[Dict[str, Any]], top_n: int = 3,
-                      min_score: float = 0.55) -> List[tuple[str, float]]:
-    ranked: List[tuple[str, float, bool]] = []
-    for q, ev in zip(questions, evaluations):
-        score = float(ev.get("score", 0.5))
-        central = bool(ev.get("central", False))
-        ranked.append((q, score, central))
-    # Prioritize central questions, then by score
-    ranked.sort(key=lambda x: (x[2], x[1]), reverse=True)
-
-    selected: List[tuple[str, float]] = []
-    # First pass: central questions above threshold
-    for q, score, central in ranked:
-        if len(selected) >= top_n:
-            break
-        if central and score >= min_score:
-            selected.append((q, score))
-    # Second pass: remaining central questions even if slightly below threshold
-    if len(selected) < top_n:
-        for q, score, central in ranked:
-            if len(selected) >= top_n:
-                break
-            if central and (q, score) not in selected:
-                selected.append((q, score))
-    # Final pass: allow highest scoring non-central questions only if still short
-    if len(selected) < top_n:
-        for q, score, central in ranked:
-            if len(selected) >= top_n:
-                break
-            if not central and (q, score) not in selected:
-                selected.append((q, score))
-    return selected[:top_n]
-
-def _answer_with_citations(
-    question: str,
-    k: int,
-    min_score: float,
-    doc_ids: List[str],
-    store_basepath: str,
-    prefetched_pool: Optional[List[ProofSpan]] = None,
-    pool_k: Optional[int] = None,
-    store: Optional[VectorStore] = None,
-) -> AnswerWithCitations:
-    store = store or VectorStore(basepath=store_basepath)
-    extra_kwargs = {
-        "prefetched_pool": prefetched_pool,
-        "pool_k": pool_k,
-    }
-    return generate_answer(
-        question=question,
-        k=k,
-        min_score=min_score,
-        allowed_doc_ids=doc_ids,
-        store=store,
-        **extra_kwargs,
-    )
-
 def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dict[str, Any]:
+    """
+    Validate answer groundedness against source proofs.
+    Returns dict with 'score' (0.0-1.0) and 'critique' (string).
+    """
     sources = []
     for i, p in enumerate(proofs, 1):
         sources.append(f"S{i}: doc={p.doc_id} page={p.page} score={p.score:.2f}\n{p.text}")
@@ -389,8 +92,10 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
     try:
         resp = chat_completions_create(
             model=CHAT_MODEL,
-            messages=[{"role": "system", "content": "You are a strict fact-checker."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a strict fact-checker."},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0,
             max_tokens=300,
             response_format={"type": "json_object"},
@@ -399,8 +104,10 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
     except Exception:
         resp = chat_completions_create(
             model=CHAT_MODEL,
-            messages=[{"role": "system", "content": "You are a strict fact-checker."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a strict fact-checker."},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0,
             max_tokens=300,
         )
@@ -415,361 +122,673 @@ def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dic
         data["critique"] = "No critique provided."
     return data
 
-def _format_report(items: List[QAItem]) -> str:
-    lines = []
-    for i, it in enumerate(items, 1):
-        lines.append(f"Q{i}: {it['question']}\n")
-        lines.append(f"Answer:\n{it['answer']}\n")
-        score = it.get("answer_score", 0.0)
-        forced = it.get("forced", False)
-        flag = " (forced accept)" if forced else ""
-        lines.append(f"Answer score: {score:.2f}{flag}")
-        critique = it.get("critique")
-        if critique:
-            lines.append(f"Critique: {critique}")
-        lines.append("Proofs:")
-        for j, p in enumerate(it["proofs"], 1):
-            lines.append(f"- S{j} | doc={p['doc_id']} page={p['page']} score={p['score']:.2f}")
-            text = " ".join((p.get("text") or "").split())
-            if text:
-                lines.append(f'  "{text}"')
-            else:
-                lines.append("  (no proof text)")
-        lines.append("")
-    return "\n".join(lines).strip()
+
+# ------------- State -------------
+
+
+class CardGenState(TypedDict):
+    """State for single card generation flow."""
+    
+    # Input
+    exam_id: str
+    user_id: str
+    store_basepath: str
+    
+    # Current topic
+    topic_id: str
+    topic_label: str
+    difficulty: int
+    allowed_chunk_ids: List[str]
+    context_pack: str
+    
+    # Question state
+    question: Optional[str]
+    question_embedding: Optional[np.ndarray]
+    question_vector_idx: Optional[int]
+    is_unique: bool
+    
+    # Answer state
+    answer: Optional[str]
+    proofs: Optional[List[ProofSpan]]
+    validation_score: Optional[float]
+    validation_critique: Optional[str]
+    
+    # Retry tracking
+    question_attempts: int
+    answer_attempts: int
+    full_restart_count: int
+    
+    # Limits
+    max_question_attempts: int
+    max_answer_attempts: int
+    max_full_restarts: int
+    
+    # Retrieval params (for strengthening)
+    k: int
+    min_score: float
+    
+    # Flow control
+    stop_after_embedding: bool  # For parallel starter pack: stop after Phase 1
+    
+    # Output
+    card: Optional[GeneratedCard]
+
 
 # ------------- Nodes -------------
 
-def node_propose_questions(state: State) -> State:
-    store = VectorStore(basepath=state["store_basepath"])
-    context, summary = _get_context_and_summary(store, state["doc_ids"], state["store_basepath"])
-    candidate_count = max(state["target_n"] * 4, 12)
-    raw_qs = _propose_questions_from_context(context, summary, n=candidate_count)
-    deduped = _build_question_pool(raw_qs, state["target_n"], store=store)
-    evaluations = _score_questions(context, summary, deduped)
-    selected = _select_questions(deduped, evaluations, top_n=state["target_n"])
-    questions = [q for q, _ in selected]
-    question_scores = [score for _, score in selected]
-    if not questions:
-        fallback = deduped[:state["target_n"]]
-        questions = fallback
-        question_scores = [0.5] * len(fallback)
+
+def node_generate_question(state: CardGenState) -> CardGenState:
+    """Generate a question at the specified difficulty level."""
+    question = generate_question_at_difficulty(
+        topic_label=state["topic_label"],
+        context_pack=state["context_pack"],
+        difficulty=state["difficulty"],
+    )
     return {
         **state,
-        "questions": questions,
-        "question_scores": question_scores,
-        "current_index": 0,
-        "qa": [],
-        "attempts": 0,
-        "summary": summary,
+        "question": question,
+        "question_attempts": state["question_attempts"] + 1,
     }
 
-def node_answer(state: State) -> State:
-    idx = state["current_index"]
-    q = state["questions"][idx]
+
+def node_embed_question(state: CardGenState) -> CardGenState:
+    """Embed the generated question."""
     store = VectorStore(basepath=state["store_basepath"])
-    retrieval_cache = state.get("retrieval_cache", {})
-    cache_entry = retrieval_cache.get(idx)
-    desired_pool = max(state["k"] + 6, 16)
-    pool, updated_entry = _get_or_build_retrieval_pool(
-        q,
-        state["doc_ids"],
-        store,
-        desired_pool,
-        cache_entry,
-    )
-    ans = _answer_with_citations(
-        q,
+    embedding = _embed_with_store_cache([state["question"]], store)[0]
+    return {
+        **state,
+        "question_embedding": embedding,
+    }
+
+
+def node_check_uniqueness(state: CardGenState) -> CardGenState:
+    """
+    Check if question is semantically unique within this exam.
+    Uses FAISS search for O(log n) similarity lookup.
+    """
+    question_index = QuestionIndex(basepath=state["store_basepath"])
+    store = VectorStore(basepath=state["store_basepath"])
+    
+    # If index is empty, question is unique
+    if question_index.size() == 0:
+        return {**state, "is_unique": True}
+    
+    # Search for similar questions
+    query_vec = state["question_embedding"]
+    D, I = question_index.search(query_vec, k=20)
+    
+    # Get mapping of vector_idx -> card for this exam
+    exam_cards = store.db.get_cards_with_question_vector_idx(exam_id=state["exam_id"])
+    
+    # Check if any result is from the same exam with similarity >= threshold
+    threshold = DEFAULT_CONFIG["uniqueness_threshold"]
+    for sim, idx in zip(D[0], I[0]):
+        if idx < 0:
+            continue
+        # Only check cards from the same exam
+        if int(idx) in exam_cards and sim >= threshold:
+            logger.debug(
+                "Question duplicate found: sim=%.3f, threshold=%.3f",
+                sim, threshold
+            )
+            return {**state, "is_unique": False}
+    
+    return {**state, "is_unique": True}
+
+
+def node_store_embedding(state: CardGenState) -> CardGenState:
+    """Store the question embedding in the question index."""
+    question_index = QuestionIndex(basepath=state["store_basepath"])
+    vector_idx = question_index.add(state["question_embedding"])
+    return {
+        **state,
+        "question_vector_idx": vector_idx,
+    }
+
+
+def node_generate_answer(state: CardGenState) -> CardGenState:
+    """Generate answer using topic-scoped retrieval."""
+    store = VectorStore(basepath=state["store_basepath"])
+    
+    result = generate_answer(
+        question=state["question"],
         k=state["k"],
         min_score=state["min_score"],
-        doc_ids=state["doc_ids"],
-        store_basepath=state["store_basepath"],
-        prefetched_pool=pool,
-        pool_k=desired_pool,
         store=store,
+        allowed_chunk_ids=state["allowed_chunk_ids"],
     )
-    retrieval_cache[idx] = updated_entry
+    
     return {
         **state,
-        "working_answer": ans.answer,
-        "working_proofs": ans.proofs,
-        "working_score": ans.score,
-        "working_answer_critique": ans.critique,
-        "retrieval_cache": retrieval_cache,
+        "answer": result.answer,
+        "proofs": result.proofs,
+        "answer_attempts": state["answer_attempts"] + 1,
     }
 
-def node_judge(state: State) -> State:
-    idx = state["current_index"]
-    q = state["questions"][idx]
-    answer = state["working_answer"] or ""
-    proofs = state["working_proofs"] or []
-    score = state.get("working_score")
-    critique = state.get("working_answer_critique") or ""
-    if score is None:
-        judge = _validate_answer(q, answer, proofs)
-        score = float(judge.get("score", 0.5))
-        critique = str(judge.get("critique", ""))
-    accepted = score >= 0.7
-    attempts_used = state["attempts"] + 1
-    force_accept = not accepted and attempts_used >= state["max_attempts"]
-    qa_list = state["qa"][:]
-    if accepted or force_accept:
-        qa_entry: QAItem = {
-            "question": q,
-            "answer": answer,
-            "proofs": [p.model_dump() for p in proofs],
-            "question_score": state["question_scores"][idx] if idx < len(state["question_scores"]) else 0.5,
-            "answer_score": score,
+
+def node_validate(state: CardGenState) -> CardGenState:
+    """Validate the answer for groundedness."""
+    validation = _validate_answer(
+        question=state["question"],
+        answer=state["answer"],
+        proofs=state["proofs"] or [],
+    )
+    return {
+        **state,
+        "validation_score": float(validation.get("score", 0.5)),
+        "validation_critique": str(validation.get("critique", "")),
+    }
+
+
+def node_strengthen(state: CardGenState) -> CardGenState:
+    """Strengthen retrieval parameters for retry."""
+    return {
+        **state,
+        "k": state["k"] + DEFAULT_CONFIG["strengthen_k_delta"],
+        "min_score": max(0.2, state["min_score"] - DEFAULT_CONFIG["strengthen_min_score_delta"]),
+    }
+
+
+def node_store_card(state: CardGenState) -> CardGenState:
+    """Store the validated card in the database."""
+    store = VectorStore(basepath=state["store_basepath"])
+    
+    card_id = uuid.uuid4().hex[:16]
+    
+    # Store card with question_vector_idx in info
+    store.db.upsert_card(
+        card_id=card_id,
+        exam_id=state["exam_id"],
+        topic_id=state["topic_id"],
+        question=state["question"],
+        answer=state["answer"],
+        difficulty=state["difficulty"],
+        status="active",
+        info={
+            "question_vector_idx": state["question_vector_idx"],
+            "topic_label": state["topic_label"],
+            "user_id": state["user_id"],
+            "validation_score": state["validation_score"],
+        },
+    )
+    
+    # Store proofs
+    proofs_data = [
+        {
+            "doc_id": p.doc_id,
+            "page": p.page,
+            "start": p.start,
+            "end": p.end,
+            "text": p.text or "",
+            "score": float(p.score or 0.0),
         }
-        if force_accept:
-            qa_entry["forced"] = True
-            if critique:
-                qa_entry["critique"] = critique
-        elif critique:
-            qa_entry["critique"] = critique
-        qa_list.append(qa_entry)
+        for p in (state["proofs"] or [])
+    ]
+    store.db.replace_card_proofs(card_id=card_id, proofs=proofs_data)
+    
+    # Create output card
+    card = GeneratedCard(
+        card_id=card_id,
+        exam_id=state["exam_id"],
+        topic_id=state["topic_id"],
+        topic_label=state["topic_label"],
+        question=state["question"],
+        answer=state["answer"],
+        difficulty=state["difficulty"],
+        proofs=proofs_data,
+    )
+    
+    return {**state, "card": card}
+
+
+def node_full_restart(state: CardGenState) -> CardGenState:
+    """Reset state for full restart with new question."""
     return {
         **state,
-        "last_critique": critique,
-        "attempts": state["attempts"] + 1,
-        "qa": qa_list,
+        "question": None,
+        "question_embedding": None,
+        "question_vector_idx": None,
+        "is_unique": False,
+        "answer": None,
+        "proofs": None,
+        "validation_score": None,
+        "validation_critique": None,
+        "question_attempts": 0,
+        "answer_attempts": 0,
+        "full_restart_count": state["full_restart_count"] + 1,
+        "k": DEFAULT_CONFIG["initial_k"],
+        "min_score": DEFAULT_CONFIG["initial_min_score"],
     }
 
-def should_retry(state: State) -> str:
-    idx = state["current_index"]
-    accepted_for_this_idx = len(state["qa"]) > idx
-    if accepted_for_this_idx:
-        return "accept"
-    if state["attempts"] < state["max_attempts"]:
-        return "retry"
-    return "accept"
 
-def node_strengthen(state: State) -> State:
-    return {
-        **state,
-        "k": min(12, state["k"] + 2),
-        "min_score": max(0.25, state["min_score"] - 0.05),
-    }
+# ------------- Conditional Edges -------------
 
-def node_next_or_finish(state: State) -> State:
-    if len(state["qa"]) >= state["target_n"]:
-        return state
-    if state["current_index"] + 1 < len(state["questions"]):
-        return {
-            **state,
-            "current_index": state["current_index"] + 1,
-            "attempts": 0,
-            "working_answer": None,
-            "working_proofs": None,
-            "working_score": None,
-            "working_answer_critique": None,
-            "last_critique": None,
-            "k": 10,
-            "min_score": 0.4,
-        }
-    return {
-        **state,
-        "current_index": len(state["questions"]),
-        "attempts": 0,
-        "working_answer": None,
-        "working_proofs": None,
-        "working_score": None,
-        "working_answer_critique": None,
-        "last_critique": None,
-        "k": 10,
-        "min_score": 0.4,
-    }
 
-# ------------- Per-question runner (isolated) -------------
+def decide_after_uniqueness(state: CardGenState) -> str:
+    """Decide next step after uniqueness check."""
+    if state["is_unique"]:
+        return "store_embedding"
+    
+    if state["question_attempts"] < state["max_question_attempts"]:
+        return "regenerate_question"
+    
+    # Max question retries reached, do full restart
+    if state["full_restart_count"] < state["max_full_restarts"]:
+        return "full_restart"
+    
+    # Absolute max reached - give up
+    return "end"
 
-def run_single_question(
-    *,
-    question: str,
-    question_score: float,
-    doc_ids: Sequence[str],
-    store_basepath: str,
-    k: int = 10,
-    min_score: float = 0.4,
-    max_attempts: int = 3,
-) -> QAItem:
-    """
-    Runs the exact same per-question pipeline currently implemented by the graph:
-    answer -> judge -> (strengthen -> answer -> judge)* until accept/force-accept.
 
-    This function is intentionally isolated (no shared state) to enable safe parallelism later.
-    """
-    state: State = {
-        "doc_ids": [d for d in doc_ids if d],
-        "store_basepath": store_basepath,
-        "k": k,
-        "min_score": min_score,
-        "target_n": 1,
-        "attempts": 0,
-        "max_attempts": max_attempts,
-        "questions": [question],
-        "question_scores": [question_score],
-        "current_index": 0,
-        "qa": [],
-        "working_answer": None,
-        "working_proofs": None,
-        "working_score": None,
-        "working_answer_critique": None,
-        "last_critique": None,
-        "summary": "",
-        "retrieval_cache": {},
-    }
+def decide_after_validation(state: CardGenState) -> str:
+    """Decide next step after answer validation."""
+    threshold = DEFAULT_CONFIG["validation_threshold"]
+    
+    if state["validation_score"] >= threshold:
+        return "store_card"
+    
+    if state["answer_attempts"] < state["max_answer_attempts"]:
+        return "strengthen"
+    
+    # Max answer retries reached, do full restart
+    if state["full_restart_count"] < state["max_full_restarts"]:
+        return "full_restart"
+    
+    # Absolute max reached - give up
+    return "end"
 
-    while True:
-        state = node_answer(state)
-        state = node_judge(state)
-        decision = should_retry(state)
-        if decision == "retry":
-            state = node_strengthen(state)
-            continue
-        # accept path: either accepted or force-accepted; for this single question we expect 1 QA item.
-        if state["qa"]:
-            return state["qa"][0]
-        # Extremely defensive fallback (shouldn't happen): return whatever was computed.
-        return {
-            "question": question,
-            "answer": state.get("working_answer") or "",
-            "proofs": [p.model_dump() for p in (state.get("working_proofs") or [])],
-            "question_score": question_score,
-            "answer_score": float(state.get("working_score") or 0.0),
-        }
 
-# ------------- Build graph -------------
+def decide_after_restart(state: CardGenState) -> str:
+    """Decide next step after full restart."""
+    if state["full_restart_count"] < state["max_full_restarts"]:
+        return "generate_question"
+    return "end"
 
-def build_graph():
-    g = StateGraph(State)
-    g.add_node("propose_questions", node_propose_questions)
-    g.add_node("answer", node_answer)
-    g.add_node("judge", node_judge)
+
+def decide_after_store_embedding(state: CardGenState) -> str:
+    """Decide whether to continue to answering or stop (for parallel starter pack)."""
+    if state.get("stop_after_embedding", False):
+        return "end"
+    return "generate_answer"
+
+
+# ------------- Graph Builder -------------
+
+
+def build_card_graph():
+    """Build the LangGraph for single card generation."""
+    g = StateGraph(CardGenState)
+    
+    # Add nodes
+    g.add_node("generate_question", node_generate_question)
+    g.add_node("embed_question", node_embed_question)
+    g.add_node("check_uniqueness", node_check_uniqueness)
+    g.add_node("store_embedding", node_store_embedding)
+    g.add_node("generate_answer", node_generate_answer)
+    g.add_node("validate", node_validate)
     g.add_node("strengthen", node_strengthen)
-    g.add_node("next_or_finish", node_next_or_finish)
-
-    g.set_entry_point("propose_questions")
-    g.add_edge("propose_questions", "answer")
-    g.add_edge("answer", "judge")
-    g.add_conditional_edges("judge", should_retry, {
-        "retry": "strengthen",
-        "accept": "next_or_finish",
-    })
-    g.add_edge("strengthen", "answer")
-
-    def done_or_continue(state: State) -> str:
-        if len(state["qa"]) >= state["target_n"]:
-            return END
-        if state["current_index"] >= len(state["questions"]):
-            return END
-        return "answer"
-
-    g.add_conditional_edges("next_or_finish", done_or_continue, {
-        "answer": "answer",
-        END: END,
-    })
+    g.add_node("store_card", node_store_card)
+    g.add_node("full_restart", node_full_restart)
+    
+    # Set entry point
+    g.set_entry_point("generate_question")
+    
+    # Linear edges
+    g.add_edge("generate_question", "embed_question")
+    g.add_edge("embed_question", "check_uniqueness")
+    g.add_edge("generate_answer", "validate")
+    g.add_edge("strengthen", "generate_answer")
+    g.add_edge("store_card", END)
+    
+    # Conditional edge after store_embedding (for parallel starter pack)
+    g.add_conditional_edges(
+        "store_embedding",
+        decide_after_store_embedding,
+        {
+            "generate_answer": "generate_answer",
+            "end": END,
+        },
+    )
+    
+    # Conditional edges after uniqueness check
+    g.add_conditional_edges(
+        "check_uniqueness",
+        decide_after_uniqueness,
+        {
+            "store_embedding": "store_embedding",
+            "regenerate_question": "generate_question",
+            "full_restart": "full_restart",
+            "end": END,
+        },
+    )
+    
+    # Conditional edges after validation
+    g.add_conditional_edges(
+        "validate",
+        decide_after_validation,
+        {
+            "store_card": "store_card",
+            "strengthen": "strengthen",
+            "full_restart": "full_restart",
+            "end": END,
+        },
+    )
+    
+    # Conditional edges after full restart
+    g.add_conditional_edges(
+        "full_restart",
+        decide_after_restart,
+        {
+            "generate_question": "generate_question",
+            "end": END,
+        },
+    )
+    
     return g.compile()
 
-# ------------- Runner -------------
 
-def run_generate_qa(doc_ids: Sequence[str], num_questions: int = 5, store_basepath: str = "store") -> Dict[str, Any]:
-    t0 = time.monotonic()
-    doc_id_list = [d for d in doc_ids if d]
-    if not doc_id_list:
-        return {"doc_ids": [], "n": 0, "items": [], "report": ""}
-    init: State = {
-        "doc_ids": doc_id_list,
-        "store_basepath": store_basepath,
-        "k": 10,
-        "min_score": 0.4,
-        "target_n": num_questions,
-        "attempts": 0,
-        "max_attempts": 3,
-        "questions": [],
-        "question_scores": [],
-        "current_index": 0,
-        "qa": [],
-        "working_answer": None,
-        "working_proofs": None,
-        "working_score": None,
-        "working_answer_critique": None,
-        "last_critique": None,
-        "summary": "",
-        "retrieval_cache": {},
+# ------------- Entry Points -------------
+
+
+def _run_question_phase(
+    *,
+    exam_id: str,
+    topic_id: str,
+    topic_label: str,
+    allowed_chunk_ids: List[str],
+    context_pack: str,
+    difficulty: int,
+    user_id: str,
+    store: VectorStore,
+) -> Optional[CardGenState]:
+    """
+    Phase 1: Generate and dedupe a unique question.
+    
+    Returns the state with question + embedding stored, or None if failed.
+    """
+    initial_state: CardGenState = {
+        "exam_id": exam_id,
+        "user_id": user_id,
+        "store_basepath": str(store.base),
+        "topic_id": topic_id,
+        "topic_label": topic_label,
+        "difficulty": difficulty,
+        "allowed_chunk_ids": allowed_chunk_ids,
+        "context_pack": context_pack,
+        "question": None,
+        "question_embedding": None,
+        "question_vector_idx": None,
+        "is_unique": False,
+        "answer": None,
+        "proofs": None,
+        "validation_score": None,
+        "validation_critique": None,
+        "question_attempts": 0,
+        "answer_attempts": 0,
+        "full_restart_count": 0,
+        "max_question_attempts": DEFAULT_CONFIG["max_question_attempts"],
+        "max_answer_attempts": DEFAULT_CONFIG["max_answer_attempts"],
+        "max_full_restarts": DEFAULT_CONFIG["max_full_restarts"],
+        "k": DEFAULT_CONFIG["initial_k"],
+        "min_score": DEFAULT_CONFIG["initial_min_score"],
+        "stop_after_embedding": True,
+        "card": None,
     }
+    
+    graph = build_card_graph()
+    final_state = graph.invoke(initial_state)
+    
+    # Check if we got a valid question + embedding
+    if final_state.get("question") and final_state.get("question_vector_idx") is not None:
+        return final_state
+    return None
 
-    # Step 1: generate all questions once (same logic as the graph entry node)
-    q_state = node_propose_questions(init)
-    questions = q_state.get("questions", [])[:num_questions]
-    question_scores = q_state.get("question_scores", [])
 
-    # Step 2: fan-out per-question pipeline runs (same per-question logic; isolated state per task)
-    items: List[QAItem] = []
-    if questions:
-        # Configurable concurrency cap. Keep conservative default to avoid rate-limit storms.
-        # You can override with QA_MAX_WORKERS=3/4/5.
-        raw_workers = os.getenv("QA_MAX_WORKERS", "2")
-        try:
-            configured_workers = int(raw_workers)
-        except Exception:
-            configured_workers = 2
-        if configured_workers <= 0:
-            configured_workers = 1
-        max_workers = min(configured_workers, len(questions))
-        logger.info(
-            "QA generation using %d worker(s) (QA_MAX_WORKERS=%r, questions=%d)",
-            max_workers,
-            raw_workers,
-            len(questions),
-        )
-        results: List[Optional[QAItem]] = [None] * len(questions)
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {}
-            for idx, q in enumerate(questions):
-                q_score = question_scores[idx] if idx < len(question_scores) else 0.5
-                fut = ex.submit(
-                    run_single_question,
-                    question=q,
-                    question_score=q_score,
-                    doc_ids=doc_id_list,
-                    store_basepath=store_basepath,
-                    k=init["k"],
-                    min_score=init["min_score"],
-                    max_attempts=init["max_attempts"],
+def _run_answer_phase(state: CardGenState) -> Optional[GeneratedCard]:
+    """
+    Phase 2: Generate answer, validate, and store card.
+    
+    Includes retry logic for validation failures.
+    Returns GeneratedCard on success, None on failure.
+    """
+    # Continue from where Phase 1 left off
+    state = {**state, "stop_after_embedding": False}
+    
+    max_answer_attempts = state["max_answer_attempts"]
+    max_full_restarts = state["max_full_restarts"]
+    
+    for restart in range(max_full_restarts):
+        for attempt in range(max_answer_attempts):
+            # Generate answer
+            state = node_generate_answer(state)
+            
+            # Validate
+            state = node_validate(state)
+            
+            # Check validation
+            if state["validation_score"] >= DEFAULT_CONFIG["validation_threshold"]:
+                # Success! Store the card
+                state = node_store_card(state)
+                return state.get("card")
+            
+            # Failed validation - strengthen and retry
+            if attempt < max_answer_attempts - 1:
+                state = node_strengthen(state)
+                logger.debug(
+                    "Answer validation failed (%.2f), strengthening retrieval (attempt %d)",
+                    state["validation_score"], attempt + 1
                 )
-                futures[fut] = idx
-            for fut in as_completed(futures):
-                idx = futures[fut]
-                results[idx] = fut.result()
-        items = [it for it in results if it is not None]
+        
+        # All answer attempts exhausted for this question
+        # For starter pack, we don't do full restart (question is already unique)
+        # Just give up on this card
+        logger.warning(
+            "Answer validation failed after %d attempts for question: %s",
+            max_answer_attempts, state["question"][:50]
+        )
+        break
+    
+    return None
 
-    report = _format_report(items)
-    elapsed_s = time.monotonic() - t0
-    logger.info("QA generation completed in %.2f minutes (%.1f seconds)", elapsed_s / 60.0, elapsed_s)
-    return {
-        "doc_ids": doc_id_list,
-        "n": len(items),
-        "items": items,
-        "report": report,
+
+def generate_single_card(
+    *,
+    exam_id: str,
+    topic_id: str,
+    topic_label: str,
+    allowed_chunk_ids: List[str],
+    context_pack: str,
+    difficulty: int = 1,
+    user_id: str = "system",
+    store: Optional[VectorStore] = None,
+    stop_after_embedding: bool = False,
+) -> Optional[GeneratedCard]:
+    """
+    Generate a single card using the LangGraph flow.
+    
+    Args:
+        stop_after_embedding: If True, stop after storing embedding (Phase 1 only).
+                              Used for parallel starter pack generation.
+    
+    Retries until success or max restarts reached.
+    Returns None only if all retries exhausted (rare edge case).
+    """
+    store = store or VectorStore()
+    
+    initial_state: CardGenState = {
+        "exam_id": exam_id,
+        "user_id": user_id,
+        "store_basepath": str(store.base),
+        "topic_id": topic_id,
+        "topic_label": topic_label,
+        "difficulty": difficulty,
+        "allowed_chunk_ids": allowed_chunk_ids,
+        "context_pack": context_pack,
+        "question": None,
+        "question_embedding": None,
+        "question_vector_idx": None,
+        "is_unique": False,
+        "answer": None,
+        "proofs": None,
+        "validation_score": None,
+        "validation_critique": None,
+        "question_attempts": 0,
+        "answer_attempts": 0,
+        "full_restart_count": 0,
+        "max_question_attempts": DEFAULT_CONFIG["max_question_attempts"],
+        "max_answer_attempts": DEFAULT_CONFIG["max_answer_attempts"],
+        "max_full_restarts": DEFAULT_CONFIG["max_full_restarts"],
+        "k": DEFAULT_CONFIG["initial_k"],
+        "min_score": DEFAULT_CONFIG["initial_min_score"],
+        "stop_after_embedding": stop_after_embedding,
+        "card": None,
     }
+    
+    graph = build_card_graph()
+    final_state = graph.invoke(initial_state)
+    
+    return final_state.get("card")
 
-if __name__ == "__main__":
-    import argparse
-    p = argparse.ArgumentParser()
-    p.add_argument("--doc_id", nargs="+", help="Existing document id(s) in the store")
-    p.add_argument("--path", help="Path to a document to ingest first")
-    p.add_argument("--n", type=int, default=5)
-    args = p.parse_args()
-    store = VectorStore()
-    if args.path:
-        from app.services.ingestion import ingest_documents
-        res = ingest_documents([args.path], store=store)[0]
-        doc_ids = [res.doc_id]
-        print(f"Ingested doc_id={doc_ids[0]}")
-    else:
-        if not args.doc_id:
-            raise SystemExit("Either --path or --doc_id must be provided")
-        doc_ids = args.doc_id
-    out = run_generate_qa(doc_ids=doc_ids, num_questions=args.n, store_basepath=str(store.base))
-    print("\n=== AUTO-QA REPORT ===\n")
-    print(out["report"])
+
+def generate_starter_cards_v2(
+    *,
+    exam_id: str,
+    user_id: str,
+    n: int = 5,
+    difficulty: int = 1,
+    store: Optional[VectorStore] = None,
+    max_workers: int = 5,
+) -> List[GeneratedCard]:
+    """
+    Generate N starter cards across distinct topics.
+    
+    Phase 1 (Sequential): Generate + dedupe unique questions for N topics
+    Phase 2 (Parallel): Answer + validate all questions simultaneously
+    
+    Returns list of generated cards (may be < N if topics insufficient).
+    """
+    store = store or VectorStore()
+    
+    # Pick top N topics
+    picked = pick_starter_topics(exam_id=exam_id, store=store, n=n)
+    if not picked:
+        logger.warning("No topics found for exam %s", exam_id)
+        return []
+    
+    # Prepare context packs for each topic
+    topic_contexts: Dict[str, Dict[str, Any]] = {}
+    for topic_id, topic_label in picked:
+        allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=topic_id)
+        if not allowed_chunk_ids:
+            continue
+        centroid = store.db.get_topic_vector(topic_id=topic_id)
+        context_pack = build_diverse_chunk_pack(
+            store=store,
+            chunk_ids=allowed_chunk_ids,
+            centroid=centroid,
+        )
+        if not context_pack:
+            continue
+        topic_contexts[topic_id] = {
+            "topic_label": topic_label,
+            "allowed_chunk_ids": allowed_chunk_ids,
+            "context_pack": context_pack,
+        }
+    
+    if not topic_contexts:
+        logger.warning("No valid topic contexts for exam %s", exam_id)
+        return []
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 1: Sequential question generation + deduplication
+    # Must be sequential so each uniqueness check sees all previous questions
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    question_states: List[CardGenState] = []
+    
+    for topic_id, ctx in topic_contexts.items():
+        if len(question_states) >= n:
+            break
+        
+        state = _run_question_phase(
+            exam_id=exam_id,
+            topic_id=topic_id,
+            topic_label=ctx["topic_label"],
+            allowed_chunk_ids=ctx["allowed_chunk_ids"],
+            context_pack=ctx["context_pack"],
+            difficulty=difficulty,
+            user_id=user_id,
+            store=store,
+        )
+        
+        if state:
+            question_states.append(state)
+            logger.info(
+                "Phase 1: Generated unique question for topic '%s': %s",
+                ctx["topic_label"], state["question"][:50]
+            )
+    
+    if not question_states:
+        logger.warning("Phase 1: No unique questions generated for exam %s", exam_id)
+        return []
+    
+    logger.info(
+        "Phase 1 complete: %d unique questions ready for answering",
+        len(question_states)
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 2: Parallel answer generation + validation
+    # Each answer is independent, so we can parallelize
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    cards: List[GeneratedCard] = []
+    
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(question_states))) as executor:
+        future_to_state = {
+            executor.submit(_run_answer_phase, state): state
+            for state in question_states
+        }
+        
+        for future in as_completed(future_to_state):
+            state = future_to_state[future]
+            try:
+                card = future.result()
+                if card:
+                    cards.append(card)
+                    logger.info(
+                        "Phase 2: Generated card %s for topic '%s'",
+                        card.card_id, card.topic_label
+                    )
+                else:
+                    logger.warning(
+                        "Phase 2: Failed to generate answer for question: %s",
+                        state["question"][:50]
+                    )
+            except Exception as e:
+                logger.error(
+                    "Phase 2: Exception generating answer for '%s': %s",
+                    state["topic_label"], str(e)
+                )
+    
+    logger.info(
+        "Phase 2 complete: %d cards generated out of %d questions",
+        len(cards), len(question_states)
+    )
+    
+    return cards
+
+
+# For backward compatibility - alias to old name pattern
+def node_propose_questions(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Backward compatibility stub.
+    The old doc-level question proposer is deprecated.
+    Use generate_starter_cards_v2() instead.
+    """
+    logger.warning(
+        "node_propose_questions is deprecated. Use generate_starter_cards_v2() instead."
+    )
+    return state
+
+

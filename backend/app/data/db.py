@@ -221,6 +221,16 @@ class SQLiteDB:
         """)
         self.conn.commit()
 
+    def close(self):
+        """Close the database connection, ensuring WAL is checkpointed."""
+        if self.conn:
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            except Exception:
+                pass  # Checkpoint may fail if already closed
+            self.conn.close()
+            self.conn = None
+
     def add_document(self, doc_id: str, path: str, title: str, info: dict):
         self.conn.execute(
             "INSERT OR REPLACE INTO documents(doc_id, path, title, info) VALUES(?,?,?,?)",
@@ -526,6 +536,58 @@ class SQLiteDB:
             )
         return out
 
+    def list_cards_for_topic(
+        self, *, topic_id: str, status: str = "active", limit: int = 200
+    ) -> List[StoredCard]:
+        """Get all cards for a specific topic."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT card_id, exam_id, topic_id, question, answer, difficulty, created_at, status, info "
+            "FROM cards WHERE topic_id=? AND status=? ORDER BY created_at ASC LIMIT ?",
+            (topic_id, status, limit),
+        )
+        rows = cur.fetchall()
+        out: List[StoredCard] = []
+        for row in rows:
+            info_raw = row[8] or "{}"
+            try:
+                info = json.loads(info_raw) if isinstance(info_raw, str) else {}
+            except Exception:
+                info = {}
+            out.append(
+                StoredCard(
+                    card_id=str(row[0]),
+                    exam_id=str(row[1]),
+                    topic_id=str(row[2]),
+                    question=str(row[3]),
+                    answer=str(row[4]),
+                    difficulty=int(row[5] or 1),
+                    created_at=str(row[6]),
+                    status=str(row[7] or "active"),
+                    info=info,
+                )
+            )
+        return out
+
+    def get_cards_with_question_vector_idx(
+        self, *, exam_id: str
+    ) -> Dict[int, StoredCard]:
+        """
+        Return mapping {vector_idx: card} for all cards in exam
+        that have question_vector_idx in their info JSON.
+        
+        Used to filter FAISS search results by exam during deduplication.
+        """
+        cards = self.list_cards_for_exam(exam_id=exam_id, limit=10000)
+        mapping: Dict[int, StoredCard] = {}
+        for card in cards:
+            vector_idx = card.info.get("question_vector_idx")
+            if vector_idx is not None:
+                try:
+                    mapping[int(vector_idx)] = card
+                except (ValueError, TypeError):
+                    continue
+        return mapping
 
     def replace_topic_evidence(
         self,

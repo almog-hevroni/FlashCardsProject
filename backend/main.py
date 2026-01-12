@@ -1,4 +1,4 @@
-import argparse, json, logging
+import argparse, json, logging, time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -12,7 +12,6 @@ from app.services.ingestion import ingest_documents
 from app.services.retrieval import retrieve_with_proofs
 from app.data.vector_store import VectorStore
 from app.services.qa import generate_answer
-from app.services.graph import run_generate_qa
 from app.services.exams import create_exam, load_exam, attach_documents, log_event
 from app.services.topics import build_topics_for_exam, list_topics_for_exam
 from app.services.routing import answer_in_exam, route_question_to_topic
@@ -33,16 +32,113 @@ def main():
     p.add_argument("--gen_starter_cards", action="store_true", help="generate starter flashcards for --exam_id (requires topics)")
     p.add_argument("--ask", help="question: retrieve proofs only (no LLM answer)")
     p.add_argument("--answer", help="question: retrieve + generate answer with citations")
-    p.add_argument("--qa_n", type=int, default=5, help="number of auto-generated QA pairs after ingest")
     p.add_argument("--k", type=int, default=8)
     p.add_argument("--min_score", type=float, default=0.4)
+    p.add_argument("--demo", nargs="+", help="Full demo: ingest docs, create exam, build topics, generate cards")
     args = p.parse_args()
 
     store = VectorStore()
 
+    try:
+        _run(args, store)
+    finally:
+        store.db.close()
+
+
+def _run(args, store):
+    # === DEMO MODE: Full automated flow ===
+    if args.demo:
+        print("\n" + "="*50)
+        print("FLASHCARDS DEMO - Full Automated Flow")
+        print("="*50 + "\n")
+        
+        # 1. Create exam
+        print("[Step 1/4] Creating exam workspace...")
+        exam_id = create_exam(
+            store=store,
+            user_id=args.user_id,
+            title=args.exam_title,
+            mode=args.exam_mode,
+            info={"created_via": "demo"},
+        )
+        print(f"   Created exam_id={exam_id}\n")
+        
+        # 2. Ingest documents
+        print("[Step 2/4] Ingesting documents...")
+        results = ingest_documents(args.demo, store)
+        for res in results:
+            print(f"   Ingested {res.doc_id} ({res.num_chunks} chunks)")
+        doc_ids = [res.doc_id for res in results]
+        attach_documents(store=store, exam_id=exam_id, doc_ids=doc_ids)
+        print(f"   Attached {len(doc_ids)} document(s) to exam\n")
+        
+        # 3. Build topics
+        print("[Step 3/4] Building topics (clustering content)...")
+        topics = build_topics_for_exam(
+            exam_id=exam_id,
+            store=store,
+            overwrite=True,
+            merge_threshold=args.topic_merge_threshold,
+        )
+        topic_list = list_topics_for_exam(exam_id=exam_id, store=store)
+        print(f"   Created {len(topic_list)} topic(s):")
+        for t in topic_list:
+            print(f"      - {t.label}")
+        print()
+        
+        # 4. Generate starter flashcards
+        print("[Step 4/4] Generating flashcards...")
+        start_time = time.time()
+        cards = generate_starter_cards(
+            exam_id=exam_id,
+            user_id=args.user_id,
+            store=store,
+            n=5,
+            difficulty=1,
+        )
+        elapsed = time.time() - start_time
+        print(f"   Generated {len(cards)} flashcard(s) in {elapsed:.2f} seconds")
+        if cards:
+            print(f"   Average: {elapsed/len(cards):.2f} seconds per card\n")
+        else:
+            print()
+        
+        # 5. Display cards with topics, answers, and proofs
+        print("="*50)
+        print("GENERATED FLASHCARDS WITH PROOFS")
+        print("="*50)
+        for i, c in enumerate(cards, 1):
+            print(f"\n{'-'*50}")
+            print(f"Card {i} | Topic: {c.topic_label}")
+            print(f"{'-'*50}")
+            print(f"Q: {c.question}")
+            print(f"\nA: {c.answer}")
+            
+            # Show proofs (source evidence)
+            if c.proofs:
+                print(f"\nProofs ({len(c.proofs)} source(s)):")
+                for j, proof in enumerate(c.proofs[:3], 1):  # Show top 3 proofs
+                    doc_id = proof.get('doc_id', 'unknown')
+                    page = proof.get('page', '?')
+                    score = proof.get('score', 0)
+                    text = proof.get('text', '')
+                    # Truncate long text
+                    text_preview = " ".join(text.split())[:300]
+                    if len(text) > 300:
+                        text_preview += "..."
+                    print(f"  [{j}] doc={doc_id} page={page} score={score:.2f}")
+                    print(f"      \"{text_preview}\"")
+        
+        print(f"\n{'='*50}")
+        print(f"Demo complete! exam_id={exam_id}")
+        print(f"{'='*50}\n")
+        return
+
     if args.gen_starter_cards:
         if not args.exam_id:
             raise SystemExit("--gen_starter_cards requires --exam_id")
+        print(f"Generating starter cards for exam_id={args.exam_id}...")
+        start_time = time.time()
         cards = generate_starter_cards(
             exam_id=args.exam_id,
             user_id=args.user_id,
@@ -50,11 +146,26 @@ def main():
             n=5,
             difficulty=1,
         )
-        print(f"Generated {len(cards)} starter card(s) for exam_id={args.exam_id}")
+        elapsed = time.time() - start_time
+        print(f"\nGenerated {len(cards)} starter card(s) in {elapsed:.2f} seconds")
+        if cards:
+            print(f"Average: {elapsed/len(cards):.2f} seconds per card\n")
         for c in cards:
-            print(f"\n- card_id={c.card_id} topic={c.topic_label} ({c.topic_id})")
-            print(f"  Q: {c.question}")
-            print(f"  A: {c.answer}")
+            print(f"\n{'='*60}")
+            print(f"TOPIC: {c.topic_label}")
+            print(f"Q: {c.question}")
+            print(f"\nA: {c.answer}")
+            if c.proofs:
+                print(f"\nPROOFS ({len(c.proofs)} sources):")
+                for j, proof in enumerate(c.proofs[:3], 1):
+                    doc_id = proof.get('doc_id', 'unknown')
+                    page = proof.get('page', '?')
+                    score = proof.get('score', 0)
+                    text = proof.get('text', '')[:150]
+                    print(f"  [{j}] doc={doc_id} page={page} score={score:.2f}")
+                    print(f"      \"{text}...\"")
+        print(f"\n{'='*60}")
+        print(f"Total time: {elapsed:.2f} seconds")
         return
 
     if args.build_topics:
@@ -98,10 +209,6 @@ def main():
             )
             ws = load_exam(store=store, exam_id=args.exam_id)
             print(f"Attached documents to exam_id={args.exam_id} (now {len(ws.doc_ids)} doc(s))")
-        if doc_ids and args.qa_n > 0:
-            qa_out = run_generate_qa(doc_ids=doc_ids, num_questions=args.qa_n, store_basepath=str(store.base))
-            print("\n=== AUTO-GENERATED QA ===\n")
-            print(qa_out["report"])
 
     if args.ask:
         allowed_chunk_ids = None

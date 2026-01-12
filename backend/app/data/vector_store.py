@@ -212,3 +212,90 @@ class VectorStore:
 
     def add_cached_embeddings(self, mapping: Dict[str, np.ndarray]) -> None:
         return self.db.add_cached_embeddings(mapping)
+
+
+class QuestionIndex:
+    """
+    Manages question embeddings for efficient similarity-based deduplication.
+    
+    Separate from the chunk index - stores only question vectors.
+    Uses FAISS when available, falls back to numpy otherwise.
+    
+    The mapping from vector_idx -> card_id is stored in cards.info JSON field,
+    not in a separate table.
+    """
+    
+    def __init__(self, basepath: str = "store"):
+        self.base = Path(basepath)
+        self.base.mkdir(parents=True, exist_ok=True)
+        
+        self.index_path = self.base / "questions.index"
+        self.vectors_path = self.base / "questions.npy"
+        
+        if _FAISS_AVAILABLE:
+            if self.index_path.exists():
+                self.index = faiss.read_index(str(self.index_path))  # type: ignore
+            else:
+                self.index = faiss.IndexFlatIP(VEC_DIM)  # type: ignore
+        else:
+            self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
+        
+        self.vector_dimension = VEC_DIM
+    
+    def size(self) -> int:
+        """Return the number of vectors in the index."""
+        if _FAISS_AVAILABLE:
+            return int(getattr(self.index, "ntotal", 0))
+        return int(getattr(self.index, "vectors", np.zeros((0, VEC_DIM))).shape[0])
+    
+    def search(self, query_vec: np.ndarray, k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Search for similar questions.
+        
+        Args:
+            query_vec: Query embedding, shape (dim,) or (1, dim)
+            k: Number of nearest neighbors to return
+            
+        Returns:
+            (similarities, indices) - both shape (1, k)
+            similarities are cosine similarities (higher = more similar)
+            indices are vector positions (-1 for padding if fewer than k exist)
+        """
+        if query_vec.ndim == 1:
+            query_vec = query_vec.reshape(1, -1)
+        if query_vec.dtype != np.float32:
+            query_vec = query_vec.astype("float32")
+        
+        if _FAISS_AVAILABLE:
+            faiss.normalize_L2(query_vec)  # type: ignore
+            D, I = self.index.search(query_vec, k)  # type: ignore
+        else:
+            D, I = self.index.search(query_vec, k)
+        
+        return D, I
+    
+    def add(self, embedding: np.ndarray) -> int:
+        """
+        Add a question embedding to the index.
+        
+        Args:
+            embedding: Question embedding, shape (dim,) or (1, dim)
+            
+        Returns:
+            The vector index where it was stored (to save in cards.info)
+        """
+        if embedding.ndim == 1:
+            embedding = embedding.reshape(1, -1)
+        if embedding.dtype != np.float32:
+            embedding = embedding.astype("float32")
+        
+        vector_idx = self.size()
+        
+        if _FAISS_AVAILABLE:
+            faiss.normalize_L2(embedding)  # type: ignore
+            self.index.add(embedding)  # type: ignore
+            faiss.write_index(self.index, str(self.index_path))  # type: ignore
+        else:
+            self.index.add(embedding)
+        
+        return vector_idx
