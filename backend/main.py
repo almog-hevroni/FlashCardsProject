@@ -1,8 +1,171 @@
-import argparse, json, logging, time
+import argparse, json, logging, time, sys
 from dotenv import load_dotenv
 load_dotenv()
 
-# For logging
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRESENTATION UTILITIES - Beautiful Terminal Output
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+    
+    @classmethod
+    def disable(cls):
+        """Disable colors for non-supporting terminals"""
+        cls.HEADER = cls.BLUE = cls.CYAN = cls.GREEN = ''
+        cls.YELLOW = cls.RED = cls.BOLD = cls.DIM = cls.RESET = ''
+
+# Check if terminal supports colors
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except:
+        Colors.disable()
+
+def print_banner():
+    """Print beautiful ASCII art banner"""
+    banner = f"""
+{Colors.CYAN}╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║  {Colors.BOLD}{Colors.YELLOW}    ███████╗██╗      █████╗ ███████╗██╗  ██╗ ██████╗ █████╗ ██████╗ ██████╗   {Colors.CYAN}║
+║  {Colors.BOLD}{Colors.YELLOW}    ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██╔════╝██╔══██╗██╔══██╗██╔══██╗  {Colors.CYAN}║
+║  {Colors.BOLD}{Colors.YELLOW}    █████╗  ██║     ███████║███████╗███████║██║     ███████║██████╔╝██║  ██║  {Colors.CYAN}║
+║  {Colors.BOLD}{Colors.YELLOW}    ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║██║     ██╔══██║██╔══██╗██║  ██║  {Colors.CYAN}║
+║  {Colors.BOLD}{Colors.YELLOW}    ██║     ███████╗██║  ██║███████║██║  ██║╚██████╗██║  ██║██║  ██║██████╔╝  {Colors.CYAN}║
+║  {Colors.BOLD}{Colors.YELLOW}    ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝   {Colors.CYAN}║
+║                                                                              ║
+║  {Colors.DIM}         AI-Powered Flashcard Generation System                            {Colors.CYAN}║
+║  {Colors.DIM}         Intelligent Learning Through Document Analysis                    {Colors.CYAN}║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
+"""
+    print(banner)
+
+def print_step_header(step_num, total_steps, title, icon=""):
+    """Print a beautiful step header"""
+    progress = "█" * step_num + "░" * (total_steps - step_num)
+    print(f"""
+{Colors.CYAN}┌──────────────────────────────────────────────────────────────────────────────┐
+│  {Colors.BOLD}{Colors.YELLOW}{icon} STEP {step_num}/{total_steps}: {title.upper():<55}{Colors.CYAN}│
+│  {Colors.DIM}[{progress}] {int(step_num/total_steps*100):>3}%{Colors.CYAN}                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘{Colors.RESET}
+""")
+
+def print_success(message):
+    """Print success message"""
+    print(f"  {Colors.GREEN}✓{Colors.RESET} {message}")
+
+def print_info(message):
+    """Print info message"""
+    print(f"  {Colors.CYAN}ℹ{Colors.RESET} {message}")
+
+def print_item(message, indent=2):
+    """Print list item"""
+    spaces = " " * indent
+    print(f"{spaces}{Colors.DIM}•{Colors.RESET} {message}")
+
+def print_section_divider():
+    """Print a section divider"""
+    print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}\n")
+
+def print_card(card_num, topic, question, answer, proofs):
+    """Print a beautifully formatted flashcard"""
+    print(f"""
+{Colors.CYAN}╭──────────────────────────────────────────────────────────────────────────────╮
+│  {Colors.BOLD}{Colors.YELLOW}📚 FLASHCARD #{card_num:<64}{Colors.CYAN}│
+│  {Colors.DIM}Topic: {topic[:66]:<66}{Colors.CYAN}│
+╰──────────────────────────────────────────────────────────────────────────────╯{Colors.RESET}
+""")
+    
+    # Question
+    print(f"  {Colors.BOLD}{Colors.GREEN}❓ QUESTION:{Colors.RESET}")
+    wrapped_q = _wrap_text(question, 72)
+    for line in wrapped_q:
+        print(f"     {line}")
+    
+    # Answer
+    print(f"\n  {Colors.BOLD}{Colors.BLUE}💡 ANSWER:{Colors.RESET}")
+    wrapped_a = _wrap_text(answer, 72)
+    for line in wrapped_a:
+        print(f"     {line}")
+    
+    # Proofs
+    if proofs:
+        print(f"\n  {Colors.BOLD}{Colors.DIM}📎 SOURCES ({len(proofs)} reference(s)):{Colors.RESET}")
+        for i, proof in enumerate(proofs[:2], 1):
+            doc_id = proof.get('doc_id', 'unknown')[:15]
+            page = proof.get('page', '?')
+            score = proof.get('score', 0)
+            text = proof.get('text', '')
+            text_preview = " ".join(text.split())[:120]
+            if len(text) > 120:
+                text_preview += "..."
+            print(f"     {Colors.DIM}[{i}] {doc_id} (p.{page}) score: {score:.2f}{Colors.RESET}")
+            print(f"         {Colors.DIM}\"{text_preview}\"{Colors.RESET}")
+
+def _wrap_text(text, width):
+    """Wrap text to specified width"""
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+    
+    for word in words:
+        if current_length + len(word) + 1 <= width:
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [word]
+            current_length = len(word)
+    
+    if current_line:
+        lines.append(" ".join(current_line))
+    
+    return lines if lines else [""]
+
+def print_final_summary(exam_id, num_cards, elapsed_time):
+    """Print beautiful final summary"""
+    print(f"""
+{Colors.GREEN}╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║   {Colors.BOLD}✨ DEMO COMPLETED SUCCESSFULLY! ✨{Colors.GREEN}                                       ║
+║                                                                              ║
+║   {Colors.RESET}{Colors.GREEN}📋 Exam ID:        {exam_id:<55}║
+║   📚 Cards Created:  {num_cards:<55}║
+║   ⏱️  Time Elapsed:   {elapsed_time:.2f} seconds{' ' * 46}║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
+""")
+
+def print_topics_box(topics):
+    """Print topics in a nice box"""
+    print(f"\n{Colors.CYAN}  ┌─────────────────────────────────────────────────────────────────────┐{Colors.RESET}")
+    print(f"{Colors.CYAN}  │ {Colors.BOLD}{Colors.YELLOW}📂 DISCOVERED TOPICS{Colors.CYAN}                                               │{Colors.RESET}")
+    print(f"{Colors.CYAN}  ├─────────────────────────────────────────────────────────────────────┤{Colors.RESET}")
+    for t in topics:
+        label = t.label[:63] if len(t.label) > 63 else t.label
+        print(f"{Colors.CYAN}  │{Colors.RESET}  • {label:<64}{Colors.CYAN}│{Colors.RESET}")
+    print(f"{Colors.CYAN}  └─────────────────────────────────────────────────────────────────────┘{Colors.RESET}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Default logging - will be adjusted for demo mode
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
@@ -35,6 +198,7 @@ def main():
     p.add_argument("--k", type=int, default=8)
     p.add_argument("--min_score", type=float, default=0.4)
     p.add_argument("--demo", nargs="+", help="Full demo: ingest docs, create exam, build topics, generate cards")
+    p.add_argument("--quiet", action="store_true", help="Suppress logging output for clean demo")
     args = p.parse_args()
 
     store = VectorStore()
@@ -46,14 +210,28 @@ def main():
 
 
 def _run(args, store):
-    # === DEMO MODE: Full automated flow ===
+    # === DEMO MODE: Full automated flow with beautiful output ===
     if args.demo:
-        print("\n" + "="*50)
-        print("FLASHCARDS DEMO - Full Automated Flow")
-        print("="*50 + "\n")
+        # Suppress all logging for clean presentation
+        logging.getLogger().setLevel(logging.CRITICAL)
+        for name in ['app.services.ingestion', 'app.services.graph', 'app.services.llm', 
+                     'app.services.topics', 'app.services.cards', 'app.services.retrieval',
+                     'app.data.vector_store', 'app.data.db', 'httpx', 'openai']:
+            logging.getLogger(name).setLevel(logging.CRITICAL)
         
-        # 1. Create exam
-        print("[Step 1/4] Creating exam workspace...")
+        demo_start_time = time.time()
+        
+        # Clear screen and show banner
+        print("\033[2J\033[H", end="")  # Clear screen
+        print_banner()
+        
+        time.sleep(0.5)  # Dramatic pause
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 1: Create Exam Workspace
+        # ─────────────────────────────────────────────────────────────────────
+        print_step_header(1, 4, "Creating Exam Workspace", "🎯")
+        
         exam_id = create_exam(
             store=store,
             user_id=args.user_id,
@@ -61,19 +239,42 @@ def _run(args, store):
             mode=args.exam_mode,
             info={"created_via": "demo"},
         )
-        print(f"   Created exam_id={exam_id}\n")
         
-        # 2. Ingest documents
-        print("[Step 2/4] Ingesting documents...")
+        print_success(f"Exam workspace created successfully!")
+        print_info(f"Exam ID: {Colors.BOLD}{exam_id}{Colors.RESET}")
+        print_info(f"Title: {args.exam_title}")
+        print_info(f"Mode: {args.exam_mode}")
+        
+        time.sleep(0.3)
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 2: Ingest Documents
+        # ─────────────────────────────────────────────────────────────────────
+        print_step_header(2, 4, "Ingesting Documents", "📄")
+        
+        print_info("Processing documents...")
         results = ingest_documents(args.demo, store)
+        
         for res in results:
-            print(f"   Ingested {res.doc_id} ({res.num_chunks} chunks)")
+            print_success(f"Ingested: {res.doc_id}")
+            print_item(f"Chunks created: {res.num_chunks}", indent=4)
+        
         doc_ids = [res.doc_id for res in results]
         attach_documents(store=store, exam_id=exam_id, doc_ids=doc_ids)
-        print(f"   Attached {len(doc_ids)} document(s) to exam\n")
         
-        # 3. Build topics
-        print("[Step 3/4] Building topics (clustering content)...")
+        print()
+        print_success(f"Attached {len(doc_ids)} document(s) to exam")
+        
+        time.sleep(0.3)
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 3: Build Topics (Clustering)
+        # ─────────────────────────────────────────────────────────────────────
+        print_step_header(3, 4, "Analyzing & Clustering Content", "🧠")
+        
+        print_info("Running AI-powered topic extraction...")
+        print_info("Clustering document content...")
+        
         topics = build_topics_for_exam(
             exam_id=exam_id,
             store=store,
@@ -81,14 +282,22 @@ def _run(args, store):
             merge_threshold=args.topic_merge_threshold,
         )
         topic_list = list_topics_for_exam(exam_id=exam_id, store=store)
-        print(f"   Created {len(topic_list)} topic(s):")
-        for t in topic_list:
-            print(f"      - {t.label}")
+        
+        print_success(f"Identified {len(topic_list)} distinct topic(s)")
+        print_topics_box(topic_list)
+        
+        time.sleep(0.3)
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # STEP 4: Generate Flashcards
+        # ─────────────────────────────────────────────────────────────────────
+        print_step_header(4, 4, "Generating AI Flashcards", "✨")
+        
+        print_info("Generating intelligent flashcards with RAG...")
+        print_info("This may take a moment...")
         print()
         
-        # 4. Generate starter flashcards
-        print("[Step 4/4] Generating flashcards...")
-        start_time = time.time()
+        card_start_time = time.time()
         cards = generate_starter_cards(
             exam_id=exam_id,
             user_id=args.user_id,
@@ -96,43 +305,46 @@ def _run(args, store):
             n=5,
             difficulty=1,
         )
-        elapsed = time.time() - start_time
-        print(f"   Generated {len(cards)} flashcard(s) in {elapsed:.2f} seconds")
+        card_elapsed = time.time() - card_start_time
+        
+        print_success(f"Generated {len(cards)} flashcard(s)")
+        print_info(f"Generation time: {card_elapsed:.2f} seconds")
         if cards:
-            print(f"   Average: {elapsed/len(cards):.2f} seconds per card\n")
-        else:
-            print()
+            print_info(f"Average: {card_elapsed/len(cards):.2f} seconds per card")
         
-        # 5. Display cards with topics, answers, and proofs
-        print("="*50)
-        print("GENERATED FLASHCARDS WITH PROOFS")
-        print("="*50)
+        # ─────────────────────────────────────────────────────────────────────
+        # Display Generated Flashcards
+        # ─────────────────────────────────────────────────────────────────────
+        print_section_divider()
+        
+        print(f"""
+{Colors.CYAN}╔══════════════════════════════════════════════════════════════════════════════╗
+║  {Colors.BOLD}{Colors.YELLOW}📚 GENERATED FLASHCARDS{Colors.CYAN}                                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
+""")
+        
         for i, c in enumerate(cards, 1):
-            print(f"\n{'-'*50}")
-            print(f"Card {i} | Topic: {c.topic_label}")
-            print(f"{'-'*50}")
-            print(f"Q: {c.question}")
-            print(f"\nA: {c.answer}")
-            
-            # Show proofs (source evidence)
-            if c.proofs:
-                print(f"\nProofs ({len(c.proofs)} source(s)):")
-                for j, proof in enumerate(c.proofs[:3], 1):  # Show top 3 proofs
-                    doc_id = proof.get('doc_id', 'unknown')
-                    page = proof.get('page', '?')
-                    score = proof.get('score', 0)
-                    text = proof.get('text', '')
-                    # Truncate long text
-                    text_preview = " ".join(text.split())[:300]
-                    if len(text) > 300:
-                        text_preview += "..."
-                    print(f"  [{j}] doc={doc_id} page={page} score={score:.2f}")
-                    print(f"      \"{text_preview}\"")
+            print_card(
+                card_num=i,
+                topic=c.topic_label,
+                question=c.question,
+                answer=c.answer,
+                proofs=c.proofs
+            )
+            if i < len(cards):
+                print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}")
         
-        print(f"\n{'='*50}")
-        print(f"Demo complete! exam_id={exam_id}")
-        print(f"{'='*50}\n")
+        # ─────────────────────────────────────────────────────────────────────
+        # Final Summary
+        # ─────────────────────────────────────────────────────────────────────
+        total_elapsed = time.time() - demo_start_time
+        print_final_summary(exam_id, len(cards), total_elapsed)
+        
         return
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # NON-DEMO MODES (Original functionality preserved)
+    # ═══════════════════════════════════════════════════════════════════════════════
 
     if args.gen_starter_cards:
         if not args.exam_id:
