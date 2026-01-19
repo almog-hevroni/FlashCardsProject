@@ -12,7 +12,6 @@ import shutil
 from app.services.ingestion import ingest_documents
 from app.data.vector_store import VectorStore
 from app.services.qa import generate_answer
-from app.services.graph import run_generate_qa
 
 app = FastAPI(title="DocQA Proto")
 
