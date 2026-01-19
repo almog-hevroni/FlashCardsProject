@@ -35,9 +35,7 @@ async def ingest_endpoint(files: List[UploadFile] = File(...)):
         {"doc_id": res.doc_id, "num_chunks": res.num_chunks, "filename": name}
         for res, name in zip(results, filenames)
     ]
-    doc_ids = [res.doc_id for res in results]
-    qa_report = run_generate_qa(doc_ids=doc_ids, num_questions=3, store_basepath=str(store.base)) if doc_ids else None
-    return {"ok": True, "documents": docs, "qa": qa_report}
+    return {"ok": True, "documents": docs}
 
 @app.post("/ask")
 async def ask_endpoint(question: str = Form(...), k: int = Form(8), min_score: float = Form(0.4)):

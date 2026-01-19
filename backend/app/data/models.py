@@ -301,7 +301,12 @@ class CardReview(Base):
     topic_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("topics.topic_id"), nullable=False, index=True
     )
-    rating: Mapped[str] = mapped_column(String(16), nullable=False)  # again|hard|good|easy
+    # Rating values (Phase 6 semantics):
+    # - i_knew_it
+    # - almost_knew
+    # - learned_now
+    # - dont_understand
+    rating: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     info: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
 
