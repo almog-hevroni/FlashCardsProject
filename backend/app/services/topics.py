@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from app.data.db import StoredChunk, StoredTopic
+from app.data.db_repository import StoredChunk, StoredTopic
 from app.data.vector_store import VectorStore
 from app.services.exams import load_exam
 from app.services.llm import CHAT_MODEL_FAST, chat_completions_create

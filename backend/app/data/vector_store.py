@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Sequence, Optional
 import numpy as np
-from app.data.db import SQLiteDB, StoredChunk
+from app.data.db_repository import DBRepository, StoredChunk
 
 try:
     import faiss  # type: ignore
@@ -75,7 +75,7 @@ class VectorStore:
         self.base.mkdir(parents=True, exist_ok=True)
         
         # Initialize the Metadata Store (SQLite)
-        self.db = SQLiteDB(self.base / "meta.sqlite")
+        self.db = DBRepository(self.base / "meta.sqlite")
         
         # Initialize the Vector Index (FAISS or Numpy)
         self.index_path = self.base / "faiss.index"

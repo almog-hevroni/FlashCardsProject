@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from app.data.vector_store import VectorStore
-from app.data.db import StoredExam
+from app.data.db_repository import StoredExam
 
 
 @dataclass

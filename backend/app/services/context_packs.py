@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from app.data.db import StoredChunk
+from app.data.db_repository import StoredChunk
 from app.data.vector_store import VectorStore
 from app.utils.vectors import l2_normalize
 
