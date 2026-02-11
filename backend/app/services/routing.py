@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from app.data.vector_store import VectorStore
+from app.data.pinecone_backend import pinecone_namespace
 from app.services.llm import embed_query
 from app.services.qa import generate_answer, AnswerWithCitations
 from app.utils.vectors import l2_normalize
@@ -90,6 +91,12 @@ def answer_in_exam(
     route question -> select top topic(s) -> topic-scoped retrieve -> answer with proofs.
     """
     store = store or VectorStore()
+    # For Pinecone backend, scope all retrieval to this exam namespace.
+    if store.vector_backend == "pinecone":
+        exam_row = store.db.get_exam(exam_id)
+        if exam_row is None:
+            raise ValueError(f"Exam not found: {exam_id}")
+        store.set_namespace(pinecone_namespace(user_id=exam_row.user_id, exam_id=exam_id))
     q_vec = embed_query(question).astype("float32", copy=False)
     routes = route_question_to_topic(
         exam_id=exam_id,

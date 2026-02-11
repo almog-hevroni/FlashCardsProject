@@ -2,17 +2,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Sequence, Optional
+import os
 import numpy as np
 from app.data.db_repository import DBRepository, StoredChunk
+from app.data.pinecone_backend import PineconeClient
 
-try:
-    import faiss  # type: ignore
-    _FAISS_AVAILABLE = True
-except Exception:
-    faiss = None  # type: ignore
-    _FAISS_AVAILABLE = False
-
-VEC_DIM = 3072  # OpenAI text-embedding-3-small
+VEC_DIM = 3072  # OpenAI text-embedding-3-large
 
 def _normalize_L2(x: np.ndarray) -> None:
     # In-place L2 normalization along rows, similar to faiss.normalize_L2
@@ -76,24 +71,27 @@ class VectorStore:
         
         # Initialize the Metadata Store (SQLite)
         self.db = DBRepository(self.base / "meta.sqlite")
-        
-        # Initialize the Vector Index (FAISS or Numpy)
-        self.index_path = self.base / "faiss.index"
-        self.vectors_path = self.base / "vectors.npy"
 
-        if _FAISS_AVAILABLE:
-            if self.index_path.exists():
-                self.index = faiss.read_index(str(self.index_path))  # type: ignore
-            else:
-                self.index = faiss.IndexFlatIP(VEC_DIM)  # type: ignore  # cosine via normalized dot
-        else:
-            self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
+        # Vector backend selection (default keeps current behavior)
+        self.vector_backend: str = os.getenv("VECTOR_BACKEND", "pinecone").strip().lower()
+        # Pinecone namespace must be set by exam-scoped flows.
+        self.namespace: Optional[str] = None
+        self._pinecone: Optional[PineconeClient] = None
+        
+        # Local fallback index (numpy-only). Pinecone is the primary backend when configured.
+        self.vectors_path = self.base / "vectors.npy"
+        self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
         self.vector_dimension = VEC_DIM
 
+    def set_namespace(self, namespace: Optional[str]) -> None:
+        self.namespace = namespace
+
+    def _pinecone_client(self) -> PineconeClient:
+        if self._pinecone is None:
+            self._pinecone = PineconeClient()
+        return self._pinecone
+
     def _index_size(self) -> int:
-        if _FAISS_AVAILABLE:
-            return int(getattr(self.index, "ntotal", 0))
-        # numpy fallback index
         return int(getattr(self.index, "vectors", np.zeros((0, VEC_DIM), dtype="float32")).shape[0])
 
     # ------ write ------
@@ -107,18 +105,38 @@ class VectorStore:
         # 1) Save metadata to SQL
         self.db.add_chunks(chunk_list)
 
-        # 2) Add vectors to Index + persist stable mapping
+        # 2a) Pinecone backend: upsert vectors by chunk_id into current namespace.
+        if self.vector_backend == "pinecone":
+            if not self.namespace:
+                raise RuntimeError(
+                    "VectorStore.namespace not set. For Pinecone backend you must call "
+                    "store.set_namespace('u:{user_id}|e:{exam_id}') before add_chunks()."
+                )
+            if vectors.dtype != np.float32:
+                vectors = vectors.astype("float32")
+            pc = self._pinecone_client()
+            # Attach minimal metadata for debugging/filters.
+            meta_by_id: Dict[str, Dict[str, object]] = {}
+            for ch in chunk_list:
+                meta_by_id[ch.chunk_id] = {
+                    "doc_id": ch.doc_id,
+                    "page": int(ch.page),
+                }
+            pc.upsert(
+                index=pc.chunks,
+                namespace=self.namespace,
+                vectors=[(ch.chunk_id, vec) for ch, vec in zip(chunk_list, vectors)],
+                metadata_by_id=meta_by_id,
+                batch_size=100,
+            )
+            return
+
+        # 2) Local fallback: add vectors to numpy index + persist stable mapping
         if vectors.dtype != np.float32:
             vectors = vectors.astype("float32")
 
         start_index = self._index_size()
-        
-        if _FAISS_AVAILABLE:
-            faiss.normalize_L2(vectors)
-            self.index.add(vectors)
-            faiss.write_index(self.index, str(self.index_path))
-        else:
-            self.index.add(vectors)
+        self.index.add(vectors)
 
         # Persist mapping from vector positions -> chunk_id for stable retrieval
         self.db.add_vector_index_mapping(
@@ -128,14 +146,38 @@ class VectorStore:
 
     # ------ read/search ------
     def topk(self, query_vec: np.ndarray, k: int = 5) -> List[Tuple[StoredChunk, float]]:
+        # Pinecone path: return (chunk, score) by querying chunk_id vectors.
+        if self.vector_backend == "pinecone":
+            if not self.namespace:
+                # Fail fast: Pinecone is exam-scoped by namespace.
+                raise RuntimeError(
+                    "VectorStore.namespace not set. For Pinecone backend you must call "
+                    "store.set_namespace('u:{user_id}|e:{exam_id}') before retrieval."
+                )
+            pc = self._pinecone_client()
+            matches = pc.query(
+                index=pc.chunks,
+                namespace=self.namespace,
+                query_vec=query_vec,
+                top_k=int(k),
+                filter=None,
+            )
+            if not matches:
+                return []
+            chunk_ids = [cid for cid, _ in matches]
+            by_id = self.db.get_chunks_by_ids(chunk_ids)
+            out: List[Tuple[StoredChunk, float]] = []
+            for cid, score in matches:
+                ch = by_id.get(cid)
+                if ch is None:
+                    continue
+                out.append((ch, float(score)))
+            return out
+
         if query_vec.dtype != np.float32:
             query_vec = query_vec.astype("float32")
             
-        if _FAISS_AVAILABLE:
-            faiss.normalize_L2(query_vec)  # type: ignore
-            D, I = self.index.search(query_vec, k)  # type: ignore
-        else:
-            D, I = self.index.search(query_vec, k)
+        D, I = self.index.search(query_vec, k)
             
         # Reconstruct chunks from SQL using the index from FAISS
         out: List[Tuple[StoredChunk, float]] = []
@@ -156,6 +198,24 @@ class VectorStore:
         Notes:
         - Requires vector_index_map entries; for older stores, missing chunk_ids are skipped.
         """
+        # Pinecone path: fetch vectors by chunk_id from the current namespace.
+        if self.vector_backend == "pinecone":
+            if not self.namespace:
+                raise RuntimeError(
+                    "VectorStore.namespace not set. For Pinecone backend you must call "
+                    "store.set_namespace('u:{user_id}|e:{exam_id}') before get_vectors_for_chunk_ids()."
+                )
+            ids = [c for c in chunk_ids if c]
+            if not ids:
+                return [], np.zeros((0, self.vector_dimension), dtype="float32")
+            pc = self._pinecone_client()
+            fetched = pc.fetch_vectors(index=pc.chunks, namespace=self.namespace, ids=ids)
+            resolved_ids = [cid for cid in ids if cid in fetched]
+            if not resolved_ids:
+                return [], np.zeros((0, self.vector_dimension), dtype="float32")
+            X = np.stack([fetched[cid] for cid in resolved_ids]).astype("float32", copy=False)
+            return resolved_ids, X
+
         ids = [c for c in chunk_ids if c]
         if not ids:
             return [], np.zeros((0, self.vector_dimension), dtype="float32")
@@ -165,20 +225,6 @@ class VectorStore:
             return [], np.zeros((0, self.vector_dimension), dtype="float32")
         resolved_chunk_ids = [cid for cid, _ in resolved]
         indices = [idx for _, idx in resolved]
-
-        if _FAISS_AVAILABLE:
-            # Prefer batch reconstruction when available.
-            try:
-                if hasattr(self.index, "reconstruct_batch"):
-                    vecs = self.index.reconstruct_batch(np.array(indices, dtype="int64"))  # type: ignore
-                    return resolved_chunk_ids, np.array(vecs, dtype="float32", copy=False)
-            except Exception:
-                pass
-            # Fallback: reconstruct one-by-one.
-            out = np.zeros((len(indices), self.vector_dimension), dtype="float32")
-            for i, idx in enumerate(indices):
-                out[i] = np.array(self.index.reconstruct(int(idx)), dtype="float32")  # type: ignore
-            return resolved_chunk_ids, out
 
         # Numpy fallback index stores vectors directly
         vec_mat = getattr(self.index, "vectors", None)
@@ -212,90 +258,3 @@ class VectorStore:
 
     def add_cached_embeddings(self, mapping: Dict[str, np.ndarray]) -> None:
         return self.db.add_cached_embeddings(mapping)
-
-
-class QuestionIndex:
-    """
-    Manages question embeddings for efficient similarity-based deduplication.
-    
-    Separate from the chunk index - stores only question vectors.
-    Uses FAISS when available, falls back to numpy otherwise.
-    
-    The mapping from vector_idx -> card_id is stored in cards.info JSON field,
-    not in a separate table.
-    """
-    
-    def __init__(self, basepath: str = "store"):
-        self.base = Path(basepath)
-        self.base.mkdir(parents=True, exist_ok=True)
-        
-        self.index_path = self.base / "questions.index"
-        self.vectors_path = self.base / "questions.npy"
-        
-        if _FAISS_AVAILABLE:
-            if self.index_path.exists():
-                self.index = faiss.read_index(str(self.index_path))  # type: ignore
-            else:
-                self.index = faiss.IndexFlatIP(VEC_DIM)  # type: ignore
-        else:
-            self.index = _NumpyIPIndex(VEC_DIM, self.vectors_path)
-        
-        self.vector_dimension = VEC_DIM
-    
-    def size(self) -> int:
-        """Return the number of vectors in the index."""
-        if _FAISS_AVAILABLE:
-            return int(getattr(self.index, "ntotal", 0))
-        return int(getattr(self.index, "vectors", np.zeros((0, VEC_DIM))).shape[0])
-    
-    def search(self, query_vec: np.ndarray, k: int = 10) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Search for similar questions.
-        
-        Args:
-            query_vec: Query embedding, shape (dim,) or (1, dim)
-            k: Number of nearest neighbors to return
-            
-        Returns:
-            (similarities, indices) - both shape (1, k)
-            similarities are cosine similarities (higher = more similar)
-            indices are vector positions (-1 for padding if fewer than k exist)
-        """
-        if query_vec.ndim == 1:
-            query_vec = query_vec.reshape(1, -1)
-        if query_vec.dtype != np.float32:
-            query_vec = query_vec.astype("float32")
-        
-        if _FAISS_AVAILABLE:
-            faiss.normalize_L2(query_vec)  # type: ignore
-            D, I = self.index.search(query_vec, k)  # type: ignore
-        else:
-            D, I = self.index.search(query_vec, k)
-        
-        return D, I
-    
-    def add(self, embedding: np.ndarray) -> int:
-        """
-        Add a question embedding to the index.
-        
-        Args:
-            embedding: Question embedding, shape (dim,) or (1, dim)
-            
-        Returns:
-            The vector index where it was stored (to save in cards.info)
-        """
-        if embedding.ndim == 1:
-            embedding = embedding.reshape(1, -1)
-        if embedding.dtype != np.float32:
-            embedding = embedding.astype("float32")
-        
-        vector_idx = self.size()
-        
-        if _FAISS_AVAILABLE:
-            faiss.normalize_L2(embedding)  # type: ignore
-            self.index.add(embedding)  # type: ignore
-            faiss.write_index(self.index, str(self.index_path))  # type: ignore
-        else:
-            self.index.add(embedding)
-        
-        return vector_idx

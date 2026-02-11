@@ -8,8 +8,8 @@ python-dotenv>=1.0.0
 sqlalchemy>=2.0.35
 
 # Vector Store
-faiss-cpu>=1.8.0
 numpy>=1.24.0
+pinecone>=6.0.0
 
 # LLM & Embeddings
 openai>=1.51.0

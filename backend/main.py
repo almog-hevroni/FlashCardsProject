@@ -253,7 +253,7 @@ def _run(args, store):
         print_step_header(2, 4, "Ingesting Documents", "📄")
         
         print_info("Processing documents...")
-        results = ingest_documents(args.demo, store)
+        results = ingest_documents(args.demo, store, user_id=args.user_id, exam_id=exam_id)
         
         for res in results:
             print_success(f"Ingested: {res.doc_id}")
@@ -406,7 +406,9 @@ def _run(args, store):
         return
 
     if args.ingest:
-        results = ingest_documents(args.ingest, store)
+        if not args.exam_id:
+            raise SystemExit("--ingest requires --exam_id when using Pinecone backend")
+        results = ingest_documents(args.ingest, store, user_id=args.user_id, exam_id=args.exam_id)
         for res in results:
             print(f"Ingested doc_id={res.doc_id} chunks={res.num_chunks}")
         doc_ids = [res.doc_id for res in results]
@@ -423,6 +425,13 @@ def _run(args, store):
             print(f"Attached documents to exam_id={args.exam_id} (now {len(ws.doc_ids)} doc(s))")
 
     if args.ask:
+        if store.vector_backend == "pinecone":
+            if not args.exam_id:
+                raise SystemExit("--ask requires --exam_id when using Pinecone backend")
+            ex = store.db.get_exam(args.exam_id)
+            if ex is None:
+                raise SystemExit(f"Exam not found: {args.exam_id}")
+            store.set_namespace(f"u:{ex.user_id}|e:{args.exam_id}")
         allowed_chunk_ids = None
         if args.topic_id:
             allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=args.topic_id)
@@ -459,6 +468,13 @@ def _run(args, store):
                 print()
             return
 
+        if store.vector_backend == "pinecone":
+            if not args.exam_id:
+                raise SystemExit("--answer requires --exam_id when using Pinecone backend")
+            ex = store.db.get_exam(args.exam_id)
+            if ex is None:
+                raise SystemExit(f"Exam not found: {args.exam_id}")
+            store.set_namespace(f"u:{ex.user_id}|e:{args.exam_id}")
         allowed_chunk_ids = None
         if args.topic_id:
             allowed_chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=args.topic_id)

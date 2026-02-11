@@ -16,7 +16,8 @@ import uuid
 import numpy as np
 from langgraph.graph import StateGraph, END
 
-from app.data.vector_store import VectorStore, QuestionIndex
+from app.data.vector_store import VectorStore
+from app.data.pinecone_backend import PineconeClient, pinecone_namespace
 from app.services.llm import (
     chat_completions_create,
     CHAT_MODEL,
@@ -144,7 +145,7 @@ class CardGenState(TypedDict):
     # Question state
     question: Optional[str]
     question_embedding: Optional[np.ndarray]
-    question_vector_idx: Optional[int]
+    question_id: Optional[str]
     is_unique: bool
     
     # Answer state
@@ -194,6 +195,8 @@ def node_generate_question(state: CardGenState) -> CardGenState:
 def node_embed_question(state: CardGenState) -> CardGenState:
     """Embed the generated question."""
     store = VectorStore(basepath=state["store_basepath"])
+    if store.vector_backend == "pinecone":
+        store.set_namespace(pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"]))
     embedding = _embed_with_store_cache([state["question"]], store)[0]
     return {
         **state,
@@ -204,51 +207,85 @@ def node_embed_question(state: CardGenState) -> CardGenState:
 def node_check_uniqueness(state: CardGenState) -> CardGenState:
     """
     Check if question is semantically unique within this exam.
-    Uses FAISS search for O(log n) similarity lookup.
+    Uses Pinecone question index search for similarity lookup (topic-scoped).
     """
-    question_index = QuestionIndex(basepath=state["store_basepath"])
     store = VectorStore(basepath=state["store_basepath"])
-    
-    # If index is empty, question is unique
-    if question_index.size() == 0:
+    if store.vector_backend == "pinecone":
+        ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
+        store.set_namespace(ns)
+        pc = PineconeClient()
+        query_vec = state["question_embedding"]
+        # Topic-scoped dedupe (filter by topic_id), embedding-only
+        matches = pc.query(
+            index=pc.questions,
+            namespace=ns,
+            query_vec=query_vec,
+            top_k=20,
+            filter={"topic_id": state["topic_id"]},
+        )
+        threshold = DEFAULT_CONFIG["uniqueness_threshold"]
+        for _qid, sim in matches:
+            if sim >= threshold:
+                return {**state, "is_unique": False}
         return {**state, "is_unique": True}
-    
-    # Search for similar questions
-    query_vec = state["question_embedding"]
-    D, I = question_index.search(query_vec, k=20)
-    
-    # Get mapping of vector_idx -> card for this exam
-    exam_cards = store.db.get_cards_with_question_vector_idx(exam_id=state["exam_id"])
-    
-    # Check if any result is from the same exam with similarity >= threshold
-    threshold = DEFAULT_CONFIG["uniqueness_threshold"]
-    for sim, idx in zip(D[0], I[0]):
-        if idx < 0:
-            continue
-        # Only check cards from the same exam
-        if int(idx) in exam_cards and sim >= threshold:
-            logger.debug(
-                "Question duplicate found: sim=%.3f, threshold=%.3f",
-                sim, threshold
-            )
-            return {**state, "is_unique": False}
-    
+
+    # Fallback: if not Pinecone, keep old behavior (treat as unique).
     return {**state, "is_unique": True}
 
 
 def node_store_embedding(state: CardGenState) -> CardGenState:
-    """Store the question embedding in the question index."""
-    question_index = QuestionIndex(basepath=state["store_basepath"])
-    vector_idx = question_index.add(state["question_embedding"])
-    return {
-        **state,
-        "question_vector_idx": vector_idx,
-    }
+    """
+    Store the question in SQL question_index and upsert embedding to Pinecone questions index.
+    Must happen before answering begins (even if answer fails later).
+    """
+    store = VectorStore(basepath=state["store_basepath"])
+    question_id = uuid.uuid4().hex[:16]
+
+    if store.vector_backend == "pinecone":
+        ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
+        store.set_namespace(ns)
+        # SQL audit/source-of-truth
+        store.db.add_question_index_entry(
+            question_id=question_id,
+            exam_id=state["exam_id"],
+            topic_id=state["topic_id"],
+            question_text=state["question"] or "",
+            difficulty=int(state["difficulty"]) if state.get("difficulty") is not None else None,
+            embedding=state["question_embedding"],
+        )
+        # Pinecone similarity index
+        pc = PineconeClient()
+        pc.upsert(
+            index=pc.questions,
+            namespace=ns,
+            vectors=[(question_id, state["question_embedding"])],
+            metadata_by_id={
+                question_id: {
+                    "topic_id": state["topic_id"],
+                    "difficulty": int(state["difficulty"]),
+                }
+            },
+            batch_size=100,
+        )
+    else:
+        # Non-Pinecone path: still record SQL row for consistency
+        store.db.add_question_index_entry(
+            question_id=question_id,
+            exam_id=state["exam_id"],
+            topic_id=state["topic_id"],
+            question_text=state["question"] or "",
+            difficulty=int(state["difficulty"]) if state.get("difficulty") is not None else None,
+            embedding=state["question_embedding"],
+        )
+
+    return {**state, "question_id": question_id}
 
 
 def node_generate_answer(state: CardGenState) -> CardGenState:
     """Generate answer using topic-scoped retrieval."""
     store = VectorStore(basepath=state["store_basepath"])
+    if store.vector_backend == "pinecone":
+        store.set_namespace(pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"]))
     
     result = generate_answer(
         question=state["question"],
@@ -292,6 +329,8 @@ def node_strengthen(state: CardGenState) -> CardGenState:
 def node_store_card(state: CardGenState) -> CardGenState:
     """Store the validated card in the database."""
     store = VectorStore(basepath=state["store_basepath"])
+    if store.vector_backend == "pinecone":
+        store.set_namespace(pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"]))
     
     card_id = uuid.uuid4().hex[:16]
     
@@ -305,7 +344,7 @@ def node_store_card(state: CardGenState) -> CardGenState:
         difficulty=state["difficulty"],
         status="active",
         info={
-            "question_vector_idx": state["question_vector_idx"],
+            "question_id": state.get("question_id"),
             "topic_label": state["topic_label"],
             "user_id": state["user_id"],
             "validation_score": state["validation_score"],
@@ -347,7 +386,7 @@ def node_full_restart(state: CardGenState) -> CardGenState:
         **state,
         "question": None,
         "question_embedding": None,
-        "question_vector_idx": None,
+        "question_id": None,
         "is_unique": False,
         "answer": None,
         "proofs": None,
@@ -517,7 +556,7 @@ def _run_question_phase(
         "context_pack": context_pack,
         "question": None,
         "question_embedding": None,
-        "question_vector_idx": None,
+        "question_id": None,
         "is_unique": False,
         "answer": None,
         "proofs": None,
@@ -539,7 +578,7 @@ def _run_question_phase(
     final_state = graph.invoke(initial_state)
     
     # Check if we got a valid question + embedding
-    if final_state.get("question") and final_state.get("question_vector_idx") is not None:
+    if final_state.get("question") and final_state.get("question_id"):
         return final_state
     return None
 
@@ -614,6 +653,8 @@ def generate_single_card(
     Returns None only if all retries exhausted (rare edge case).
     """
     store = store or VectorStore()
+    if store.vector_backend == "pinecone":
+        store.set_namespace(pinecone_namespace(user_id=user_id, exam_id=exam_id))
     
     initial_state: CardGenState = {
         "exam_id": exam_id,
@@ -626,7 +667,7 @@ def generate_single_card(
         "context_pack": context_pack,
         "question": None,
         "question_embedding": None,
-        "question_vector_idx": None,
+        "question_id": None,
         "is_unique": False,
         "answer": None,
         "proofs": None,
@@ -668,6 +709,8 @@ def generate_starter_cards_v2(
     Returns list of generated cards (may be < N if topics insufficient).
     """
     store = store or VectorStore()
+    if store.vector_backend == "pinecone":
+        store.set_namespace(pinecone_namespace(user_id=user_id, exam_id=exam_id))
     
     # Pick top N topics
     picked = pick_starter_topics(exam_id=exam_id, store=store, n=n)

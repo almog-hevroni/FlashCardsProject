@@ -49,7 +49,7 @@ class DocumentIngestResponse(BaseModel):
 
 class IngestDocumentsResponse(BaseModel):
     """Response for document ingestion."""
-    ok: bool = True
+    # ok: bool = True
     exam_id: str
     documents: List[DocumentIngestResponse]
 
@@ -93,7 +93,7 @@ class BuildTopicsRequest(BaseModel):
 
 class BuildTopicsResponse(BaseModel):
     """Response for topic building."""
-    ok: bool = True
+    # ok: bool = True
     exam_id: str
     topics_created: int
     topics: List[TopicResponse]
@@ -146,7 +146,7 @@ class GenerateStarterCardsRequest(BaseModel):
 
 class GenerateStarterCardsResponse(BaseModel):
     """Response for starter card generation."""
-    ok: bool = True
+    # ok: bool = True
     exam_id: str
     cards_generated: int
     cards: List[CardResponse]
@@ -161,7 +161,7 @@ class GenerateSingleCardRequest(BaseModel):
 
 class GenerateSingleCardResponse(BaseModel):
     """Response for single card generation."""
-    ok: bool = True
+    # ok: bool = True
     card: Optional[CardResponse] = None
     error: Optional[str] = None
 
@@ -193,7 +193,7 @@ class ReviewCardRequest(BaseModel):
 
 class ReviewCardResponse(BaseModel):
     """Response for card review."""
-    ok: bool = True
+    # ok: bool = True
     review_id: str
     card_id: str
     rating: Literal["i_knew_it", "almost_knew", "learned_now", "dont_understand"]
@@ -228,7 +228,7 @@ class SessionEventRequest(BaseModel):
 
 class SessionEventResponse(BaseModel):
     """Response for session event logging."""
-    ok: bool = True
+    # ok: bool = True
     event_id: str
 
 

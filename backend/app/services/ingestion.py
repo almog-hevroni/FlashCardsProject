@@ -3,11 +3,12 @@ import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
 from app.data.vector_store import StoredChunk, VectorStore
+from app.data.pinecone_backend import pinecone_namespace
 from app.services.llm import EMBED_MODEL, embed_texts
 from app.utils.chunking import Chunk, make_chunks
 from app.utils.loaders.docx_loader import load_docx
@@ -41,7 +42,13 @@ def _detect_loader(path: str):
     return load_txt
 
 
-def _ingest_single(path: str, store: VectorStore) -> IngestResult:
+def _ingest_single(
+    path: str,
+    store: VectorStore,
+    *,
+    user_id: Optional[str] = None,
+    exam_id: Optional[str] = None,
+) -> IngestResult:
     logger.info("Starting ingestion for %s", path)
     loader = _detect_loader(path)
     logger.debug("Selected loader %s", loader.__name__)
@@ -113,20 +120,33 @@ def _ingest_single(path: str, store: VectorStore) -> IngestResult:
         )
         for c in chunks
     ]
+    # If using Pinecone backend, ingestion must be exam-scoped so vectors go into the exam namespace.
+    if store.vector_backend == "pinecone":
+        if not user_id or not exam_id:
+            raise RuntimeError(
+                "Pinecone backend requires exam-scoped ingestion: provide user_id and exam_id."
+            )
+        store.set_namespace(pinecone_namespace(user_id=user_id, exam_id=exam_id))
     store.add_chunks(stored, vectors)
     logger.info("Finished ingestion for %s (doc_id=%s)", path, doc_id)
 
     return IngestResult(doc_id=doc_id, num_chunks=len(chunks))
 
 
-def ingest_documents(paths: Sequence[str], store: Optional[VectorStore] = None) -> List[IngestResult]:
+def ingest_documents(
+    paths: Sequence[str],
+    store: Optional[VectorStore] = None,
+    *,
+    user_id: Optional[str] = None,
+    exam_id: Optional[str] = None,
+) -> List[IngestResult]:
     if not paths:
         logger.info("No paths provided for ingestion; skipping")
         return []
     store = store or VectorStore()
     results: List[IngestResult] = []
     for path in paths:
-        results.append(_ingest_single(path, store))
+        results.append(_ingest_single(path, store, user_id=user_id, exam_id=exam_id))
     logger.info("Ingested %d document(s)", len(results))
     return results
 

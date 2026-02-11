@@ -231,6 +231,25 @@ class DBRepository:
                 )
                 for c in chunks
             ]
+
+    def get_chunks_by_ids(self, chunk_ids: Sequence[str]) -> Dict[str, StoredChunk]:
+        """Fetch chunks by IDs in one query (used by Pinecone-backed retrieval)."""
+        ids = [c for c in chunk_ids if c]
+        if not ids:
+            return {}
+        with get_db() as db:
+            rows = db.query(Chunk).filter(Chunk.chunk_id.in_(ids)).all()
+            out: Dict[str, StoredChunk] = {}
+            for chunk in rows:
+                out[chunk.chunk_id] = StoredChunk(
+                    chunk_id=chunk.chunk_id,
+                    doc_id=chunk.doc_id,
+                    page=chunk.page or 0,
+                    start=chunk.start or 0,
+                    end=chunk.end or 0,
+                    text=chunk.text or "",
+                )
+            return out
     
     # =========================================================================
     # VECTOR INDEX MAPPING METHODS
@@ -663,6 +682,46 @@ class DBRepository:
                 except (ValueError, TypeError):
                     continue
         return mapping
+
+    # =========================================================================
+    # QUESTION INDEX METHODS (SQL audit/source-of-truth)
+    # =========================================================================
+
+    def add_question_index_entry(
+        self,
+        *,
+        question_id: str,
+        exam_id: str,
+        topic_id: str,
+        question_text: str,
+        difficulty: Optional[int],
+        embedding: np.ndarray,
+    ) -> None:
+        """Insert a question_index row (question must exist before answering begins)."""
+        arr = embedding.astype("float32", copy=False).reshape(-1)
+        with get_db() as db:
+            existing = db.query(QuestionIndexEntry).filter(
+                QuestionIndexEntry.question_id == question_id
+            ).first()
+            if existing:
+                existing.exam_id = exam_id
+                existing.topic_id = topic_id
+                existing.question_text = question_text
+                existing.difficulty = difficulty
+                existing.dim = int(arr.size)
+                existing.embedding = arr.tobytes()
+            else:
+                db.add(
+                    QuestionIndexEntry(
+                        question_id=question_id,
+                        exam_id=exam_id,
+                        topic_id=topic_id,
+                        question_text=question_text,
+                        difficulty=difficulty,
+                        dim=int(arr.size),
+                        embedding=arr.tobytes(),
+                    )
+                )
     
     # =========================================================================
     # EVENT METHODS

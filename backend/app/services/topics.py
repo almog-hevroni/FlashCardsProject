@@ -193,51 +193,119 @@ def _llm_label_cluster(
         "evidence_phrases": [str(x).strip() for x in evidence_phrases if str(x).strip()],
     }
 
+# def _kmeans_cluster(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
+#     """
+#     Returns assignments array of shape (n,) with values in [0..k-1].
+#     Uses a small numpy kmeans (cosine-ish via normalized vectors).
+#     """
+#     n, d = X.shape
+#     if n == 0:
+#         return np.zeros((0,), dtype="int64")
+#     k = max(1, min(int(k), n))
+
+#     # Numpy fallback (small datasets): classic kmeans on normalized vectors.
+#     rng = np.random.RandomState(seed)
+#     Xn = l2_normalize(X.astype("float32", copy=False))
+#     # init: pick k random points
+#     centroids = Xn[rng.choice(n, size=k, replace=False)].copy()
+#     for _ in range(20):
+#         sims = Xn @ centroids.T
+#         assign = np.argmax(sims, axis=1)
+#         new_centroids = centroids.copy()
+#         for j in range(k):
+#             mask = assign == j
+#             if not np.any(mask):
+#                 new_centroids[j] = Xn[rng.randint(0, n)]
+#                 continue
+#             new_centroids[j] = l2_normalize(np.mean(Xn[mask], axis=0, keepdims=True))[0]
+#         if np.allclose(new_centroids, centroids, atol=1e-4):
+#             break
+#         centroids = new_centroids
+#     sims = Xn @ centroids.T
+#     return np.argmax(sims, axis=1).astype("int64")
+
 def _kmeans_cluster(X: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
     """
     Returns assignments array of shape (n,) with values in [0..k-1].
-    Uses FAISS KMeans when available; otherwise a small numpy kmeans fallback.
+
+    Cosine-kmeans on L2-normalized vectors with:
+    - kmeans++ initialization (cosine distance = 1 - cosine_sim)
+    - multiple restarts (n_init) and best objective selection
+    - deterministic via seed
+
+    This is intended to get much closer to FAISS KMeans quality than random init.
     """
     n, d = X.shape
     if n == 0:
         return np.zeros((0,), dtype="int64")
     k = max(1, min(int(k), n))
 
-    # Try FAISS kmeans if available.
-    try:
-        import faiss  # type: ignore
-
-        # FAISS KMeans supports cosine-ish via normalized vectors + IndexFlatIP assignment.
-        Xn = l2_normalize(X.astype("float32", copy=False))
-        km = faiss.Kmeans(d, k, niter=25, verbose=False, seed=seed)  # type: ignore
-        km.train(Xn)  # type: ignore
-        centroids = km.centroids  # type: ignore
-        centroids = l2_normalize(np.array(centroids, dtype="float32", copy=False))
-        sims = Xn @ centroids.T
-        return np.argmax(sims, axis=1).astype("int64")
-    except Exception:
-        pass
-
-    # Numpy fallback (small datasets): classic kmeans on normalized vectors.
-    rng = np.random.RandomState(seed)
     Xn = l2_normalize(X.astype("float32", copy=False))
-    # init: pick k random points
-    centroids = Xn[rng.choice(n, size=k, replace=False)].copy()
-    for _ in range(20):
-        sims = Xn @ centroids.T
-        assign = np.argmax(sims, axis=1)
-        new_centroids = centroids.copy()
-        for j in range(k):
-            mask = assign == j
-            if not np.any(mask):
-                new_centroids[j] = Xn[rng.randint(0, n)]
-                continue
-            new_centroids[j] = l2_normalize(np.mean(Xn[mask], axis=0, keepdims=True))[0]
-        if np.allclose(new_centroids, centroids, atol=1e-4):
-            break
-        centroids = new_centroids
-    sims = Xn @ centroids.T
-    return np.argmax(sims, axis=1).astype("int64")
+    rng = np.random.RandomState(seed)
+
+    n_init = 8
+    max_iter = 35
+    best_assign = None
+    best_score = -1e18  # maximize mean cosine similarity to assigned centroid
+
+    def _kmeanspp_init() -> np.ndarray:
+        # centroids: (k, d)
+        centroids = np.zeros((k, d), dtype="float32")
+
+        # pick first centroid uniformly
+        first = rng.randint(0, n)
+        centroids[0] = Xn[first]
+
+        # track best similarity to any chosen centroid so far
+        best_sim = (Xn @ centroids[0].reshape(-1, 1)).reshape(-1)
+
+        for ci in range(1, k):
+            # cosine distance in [0..2] (since cosine sim in [-1..1])
+            dist = 1.0 - best_sim
+            dist = np.clip(dist, 0.0, None)
+            probs = dist * dist
+            s = float(np.sum(probs))
+            if not np.isfinite(s) or s <= 1e-12:
+                idx = rng.randint(0, n)
+            else:
+                probs = probs / s
+                idx = int(rng.choice(n, p=probs))
+            centroids[ci] = Xn[idx]
+
+            sim_new = (Xn @ centroids[ci].reshape(-1, 1)).reshape(-1)
+            best_sim = np.maximum(best_sim, sim_new)
+
+        return centroids
+
+    for _run in range(n_init):
+        centroids = _kmeanspp_init()
+
+        for _ in range(max_iter):
+            sims = Xn @ centroids.T                      # (n, k)
+            assign = np.argmax(sims, axis=1).astype("int64")
+
+            new_centroids = centroids.copy()
+            for j in range(k):
+                mask = assign == j
+                if not np.any(mask):
+                    # re-seed empty cluster
+                    new_centroids[j] = Xn[rng.randint(0, n)]
+                else:
+                    new_centroids[j] = l2_normalize(np.mean(Xn[mask], axis=0, keepdims=True))[0]
+
+            if np.allclose(new_centroids, centroids, atol=1e-4):
+                centroids = new_centroids
+                break
+            centroids = new_centroids
+
+        # objective: average similarity to assigned centroid
+        final_sims = Xn @ centroids.T
+        score = float(np.mean(final_sims[np.arange(n), assign]))
+        if score > best_score:
+            best_score = score
+            best_assign = assign
+
+    return best_assign if best_assign is not None else np.zeros((n,), dtype="int64")
 
 
 def _pick_k(num_chunks: int) -> int:
@@ -346,6 +414,13 @@ def build_topics_for_exam(
     Persists topics + topic_chunks + topic_evidence into SQLite.
     """
     store = store or VectorStore()
+    # For Pinecone backend, topic building needs the exam namespace for vector fetches.
+    if store.vector_backend == "pinecone":
+        exam_row = store.db.get_exam(exam_id)
+        if exam_row is None:
+            raise ValueError(f"Exam not found: {exam_id}")
+        from app.data.pinecone_backend import pinecone_namespace
+        store.set_namespace(pinecone_namespace(user_id=exam_row.user_id, exam_id=exam_id))
     ws = load_exam(store=store, exam_id=exam_id)
     doc_ids = ws.doc_ids
     if not doc_ids:

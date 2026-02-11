@@ -30,19 +30,36 @@ async def ingest_endpoint(files: List[UploadFile] = File(...)):
         filenames.append(file.filename)
 
     store = VectorStore()
+    if store.vector_backend == "pinecone":
+        return JSONResponse(
+            {
+                "error": "Pinecone backend requires exam-scoped ingestion. "
+                "This /ingest proto endpoint is deprecated.",
+            },
+            status_code=501,
+        )
     results = ingest_documents([str(p) for p in temp_paths], store=store)
     docs = [
         {"doc_id": res.doc_id, "num_chunks": res.num_chunks, "filename": name}
         for res, name in zip(results, filenames)
     ]
-    return {"ok": True, "documents": docs}
+    return {"documents": docs}
 
 @app.post("/ask")
 async def ask_endpoint(question: str = Form(...), k: int = Form(8), min_score: float = Form(0.4)):
-    ans = generate_answer(question=question, k=k, min_score=min_score)
+    store = VectorStore()
+    if store.vector_backend == "pinecone":
+        return JSONResponse(
+            {
+                "error": "Pinecone backend requires exam-scoped retrieval. "
+                "This /ask proto endpoint is deprecated.",
+            },
+            status_code=501,
+        )
+    ans = generate_answer(question=question, k=k, min_score=min_score, store=store)
     # Format proofs for response (short text)
     proofs = [{
         "doc_id": p.doc_id, "page": p.page, "score": p.score,
         "start": p.start, "end": p.end, "text": p.text.strip()
     } for p in ans.proofs]
-    return JSONResponse({"ok": True, "answer": ans.answer, "proofs": proofs})
+    return JSONResponse({"answer": ans.answer, "proofs": proofs})
