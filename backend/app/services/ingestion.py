@@ -9,6 +9,7 @@ import numpy as np
 
 from app.data.vector_store import StoredChunk, VectorStore
 from app.data.pinecone_backend import pinecone_namespace
+from app.services.exams import ensure_exam_ingest_allowed
 from app.services.llm import EMBED_MODEL, embed_texts
 from app.utils.chunking import Chunk, make_chunks
 from app.utils.loaders.docx_loader import load_docx
@@ -144,6 +145,8 @@ def ingest_documents(
         logger.info("No paths provided for ingestion; skipping")
         return []
     store = store or VectorStore()
+    if exam_id:
+        ensure_exam_ingest_allowed(store=store, exam_id=exam_id)
     results: List[IngestResult] = []
     for path in paths:
         results.append(_ingest_single(path, store, user_id=user_id, exam_id=exam_id))
