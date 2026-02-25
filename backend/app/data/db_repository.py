@@ -17,14 +17,15 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, delete, and_
+from sqlalchemy import select, delete, and_, func
 from sqlalchemy.orm import Session
 
-from app.data.db_engine import get_db, init_db, SessionLocal, DATABASE_URL
+from app.data.db_engine import get_db, init_db, DATABASE_URL
 from app.data.models import (
     User, Document, Chunk, EmbeddingCache, VectorIndexMap,
     Exam, ExamDocument, Topic, TopicChunk, TopicEvidence, TopicVector,
-    Card, CardProof, CardReview, Event, QuestionIndexEntry,
+    Card, CardProof, CardReview, CardTopic, CardScheduling, TopicProficiency,
+    ExamSessionState, CardPresentationLog, Event, QuestionIndexEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,61 @@ class StoredCard:
     difficulty: int
     created_at: str
     status: str
+    info: Dict[str, Any]
+
+
+@dataclass
+class StoredCardTopic:
+    card_id: str
+    topic_id: str
+    role: str
+    weight: float
+    created_at: str
+
+
+@dataclass
+class StoredCardScheduling:
+    card_id: str
+    due_at: str
+    state: str
+    interval_days: float
+    ease: float
+    reps: int
+    lapses: int
+    last_reviewed_at: str
+
+
+@dataclass
+class StoredTopicProficiency:
+    user_id: str
+    exam_id: str
+    topic_id: str
+    proficiency: float
+    current_difficulty: int
+    streak_up: int
+    streak_down: int
+    seen_count: int
+    correctish_count: int
+    last_updated_at: str
+    info: Dict[str, Any]
+
+
+@dataclass
+class StoredExamSessionState:
+    user_id: str
+    exam_id: str
+    last_served_card_id: Optional[str]
+    last_presented_at: str
+    updated_at: str
+
+
+@dataclass
+class StoredCardPresentation:
+    user_id: str
+    exam_id: str
+    sequence_no: int
+    card_id: str
+    presented_at: str
     info: Dict[str, Any]
 
 
@@ -129,14 +185,10 @@ class DBRepository:
                 )
         logger.info("SQLAlchemy database initialized")
     
-    def _get_session(self) -> Session:
-        """Get a new database session."""
-        return SessionLocal()
-    
-    def close(self):
-        """Close the database connection."""
-        # SQLAlchemy handles connection pooling, nothing to do here
-        pass
+    # def close(self):
+    #     """Close the database connection."""
+    #     # SQLAlchemy handles connection pooling, nothing to do here
+    #     pass
     
     # =========================================================================
     # DOCUMENT METHODS
@@ -682,6 +734,863 @@ class DBRepository:
                 except (ValueError, TypeError):
                     continue
         return mapping
+
+    def get_card(self, *, card_id: str) -> Optional[StoredCard]:
+        """Get a single card by ID."""
+        with get_db() as db:
+            c = db.query(Card).filter(Card.card_id == card_id).first()
+            if not c:
+                return None
+            return StoredCard(
+                card_id=c.card_id,
+                exam_id=c.exam_id,
+                topic_id=c.topic_id,
+                question=c.question,
+                answer=c.answer,
+                difficulty=c.difficulty,
+                created_at=_datetime_to_str(c.created_at),
+                status=c.status,
+                info=c.info or {},
+            )
+
+    # =========================================================================
+    # CARD TOPIC METHODS
+    # =========================================================================
+
+    def replace_card_topics(
+        self,
+        *,
+        card_id: str,
+        topics: Sequence[Dict[str, Any]],
+        session: Optional[Session] = None,
+    ) -> None:
+        """
+        Replace all topic links for a card.
+
+        Enforces one-primary-topic policy at repository layer before write.
+        """
+        rows: List[Dict[str, Any]] = []
+        for t in topics:
+            topic_id = str(t.get("topic_id") or "").strip()
+            if not topic_id:
+                continue
+            role = str(t.get("role") or "primary").strip().lower()
+            weight = float(t.get("weight") if t.get("weight") is not None else 1.0)
+            rows.append(
+                {"topic_id": topic_id, "role": role, "weight": weight}
+            )
+        primary_count = sum(1 for t in rows if t["role"] == "primary")
+        if primary_count != 1:
+            raise ValueError("card_topics requires exactly one primary topic")
+
+        if session is not None:
+            db = session
+            db.query(CardTopic).filter(CardTopic.card_id == card_id).delete(
+                synchronize_session=False
+            )
+            for t in rows:
+                db.add(
+                    CardTopic(
+                        card_id=card_id,
+                        topic_id=t["topic_id"],
+                        role=t["role"],
+                        weight=t["weight"],
+                    )
+                )
+            return
+
+        with get_db() as db:
+            db.query(CardTopic).filter(CardTopic.card_id == card_id).delete(
+                synchronize_session=False
+            )
+            for t in rows:
+                db.add(
+                    CardTopic(
+                        card_id=card_id,
+                        topic_id=t["topic_id"],
+                        role=t["role"],
+                        weight=t["weight"],
+                    )
+                )
+
+    def list_card_topics(
+        self,
+        *,
+        card_id: str,
+        session: Optional[Session] = None,
+    ) -> List[StoredCardTopic]:
+        """List card-topic links for a card (primary first)."""
+        if session is not None:
+            rows = (
+                session.query(CardTopic)
+                .filter(CardTopic.card_id == card_id)
+                .order_by(CardTopic.role.asc(), CardTopic.created_at.asc())
+                .all()
+            )
+            return [
+                StoredCardTopic(
+                    card_id=r.card_id,
+                    topic_id=r.topic_id,
+                    role=r.role,
+                    weight=float(r.weight),
+                    created_at=_datetime_to_str(r.created_at),
+                )
+                for r in rows
+            ]
+        with get_db() as db:
+            rows = (
+                db.query(CardTopic)
+                .filter(CardTopic.card_id == card_id)
+                .order_by(CardTopic.role.asc(), CardTopic.created_at.asc())
+                .all()
+            )
+            return [
+                StoredCardTopic(
+                    card_id=r.card_id,
+                    topic_id=r.topic_id,
+                    role=r.role,
+                    weight=float(r.weight),
+                    created_at=_datetime_to_str(r.created_at),
+                )
+                for r in rows
+            ]
+
+    def list_card_ids_for_topic(
+        self,
+        *,
+        topic_id: str,
+        role: Optional[str] = None,
+    ) -> List[str]:
+        """List card IDs linked to a topic, optionally filtered by role."""
+        with get_db() as db:
+            q = db.query(CardTopic).filter(CardTopic.topic_id == topic_id)
+            if role:
+                q = q.filter(CardTopic.role == role)
+            rows = q.order_by(CardTopic.created_at.asc()).all()
+            return [r.card_id for r in rows]
+
+    # =========================================================================
+    # CARD SCHEDULING METHODS
+    # =========================================================================
+
+    def get_card_scheduling(
+        self,
+        *,
+        card_id: str,
+        session: Optional[Session] = None,
+    ) -> Optional[StoredCardScheduling]:
+        """Get scheduling row for a card."""
+        if session is not None:
+            row = session.query(CardScheduling).filter(CardScheduling.card_id == card_id).first()
+            if not row:
+                return None
+            return StoredCardScheduling(
+                card_id=row.card_id,
+                due_at=_datetime_to_str(row.due_at),
+                state=row.state,
+                interval_days=float(row.interval_days),
+                ease=float(row.ease),
+                reps=int(row.reps),
+                lapses=int(row.lapses),
+                last_reviewed_at=_datetime_to_str(row.last_reviewed_at),
+            )
+
+        with get_db() as db:
+            row = db.query(CardScheduling).filter(CardScheduling.card_id == card_id).first()
+            if not row:
+                return None
+            return StoredCardScheduling(
+                card_id=row.card_id,
+                due_at=_datetime_to_str(row.due_at),
+                state=row.state,
+                interval_days=float(row.interval_days),
+                ease=float(row.ease),
+                reps=int(row.reps),
+                lapses=int(row.lapses),
+                last_reviewed_at=_datetime_to_str(row.last_reviewed_at),
+            )
+
+    def upsert_card_scheduling(
+        self,
+        *,
+        card_id: str,
+        due_at: datetime,
+        state: str,
+        interval_days: float,
+        ease: float,
+        reps: int,
+        lapses: int,
+        last_reviewed_at: Optional[datetime],
+        session: Optional[Session] = None,
+    ) -> None:
+        """Insert/update card scheduling state."""
+        if session is not None:
+            row = session.query(CardScheduling).filter(CardScheduling.card_id == card_id).first()
+            if row:
+                row.due_at = due_at
+                row.state = state
+                row.interval_days = interval_days
+                row.ease = ease
+                row.reps = reps
+                row.lapses = lapses
+                row.last_reviewed_at = last_reviewed_at
+            else:
+                session.add(
+                    CardScheduling(
+                        card_id=card_id,
+                        due_at=due_at,
+                        state=state,
+                        interval_days=interval_days,
+                        ease=ease,
+                        reps=reps,
+                        lapses=lapses,
+                        last_reviewed_at=last_reviewed_at,
+                    )
+                )
+            return
+
+        with get_db() as db:
+            row = db.query(CardScheduling).filter(CardScheduling.card_id == card_id).first()
+            if row:
+                row.due_at = due_at
+                row.state = state
+                row.interval_days = interval_days
+                row.ease = ease
+                row.reps = reps
+                row.lapses = lapses
+                row.last_reviewed_at = last_reviewed_at
+            else:
+                db.add(
+                    CardScheduling(
+                        card_id=card_id,
+                        due_at=due_at,
+                        state=state,
+                        interval_days=interval_days,
+                        ease=ease,
+                        reps=reps,
+                        lapses=lapses,
+                        last_reviewed_at=last_reviewed_at,
+                    )
+                )
+
+    def list_due_cards(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        at_or_before: Optional[datetime] = None,
+        limit: int = 200,
+    ) -> List[StoredCardScheduling]:
+        """
+        List due cards for a user/exam with deterministic ordering.
+
+        Order: due_at asc, lapses desc, card_id asc.
+        """
+        cutoff = at_or_before or datetime.now(timezone.utc)
+        with get_db() as db:
+            rows = (
+                db.query(CardScheduling)
+                .join(Card, Card.card_id == CardScheduling.card_id)
+                .join(Topic, Topic.topic_id == Card.topic_id)
+                .filter(
+                    Card.exam_id == exam_id,
+                    Topic.exam_id == exam_id,
+                    CardScheduling.due_at <= cutoff,
+                    Card.status == "active",
+                )
+                .order_by(
+                    CardScheduling.due_at.asc(),
+                    CardScheduling.lapses.desc(),
+                    CardScheduling.card_id.asc(),
+                )
+                .limit(limit)
+                .all()
+            )
+            return [
+                StoredCardScheduling(
+                    card_id=r.card_id,
+                    due_at=_datetime_to_str(r.due_at),
+                    state=r.state,
+                    interval_days=float(r.interval_days),
+                    ease=float(r.ease),
+                    reps=int(r.reps),
+                    lapses=int(r.lapses),
+                    last_reviewed_at=_datetime_to_str(r.last_reviewed_at),
+                )
+                for r in rows
+            ]
+
+    def list_card_scheduling_by_state(
+        self,
+        *,
+        exam_id: str,
+        state: str,
+        limit: int = 200,
+    ) -> List[StoredCardScheduling]:
+        """List scheduling rows for cards in exam by scheduling state."""
+        with get_db() as db:
+            rows = (
+                db.query(CardScheduling)
+                .join(Card, Card.card_id == CardScheduling.card_id)
+                .filter(Card.exam_id == exam_id, CardScheduling.state == state)
+                .order_by(
+                    CardScheduling.due_at.asc(),
+                    CardScheduling.card_id.asc(),
+                )
+                .limit(limit)
+                .all()
+            )
+            return [
+                StoredCardScheduling(
+                    card_id=r.card_id,
+                    due_at=_datetime_to_str(r.due_at),
+                    state=r.state,
+                    interval_days=float(r.interval_days),
+                    ease=float(r.ease),
+                    reps=int(r.reps),
+                    lapses=int(r.lapses),
+                    last_reviewed_at=_datetime_to_str(r.last_reviewed_at),
+                )
+                for r in rows
+            ]
+
+    # =========================================================================
+    # TOPIC PROFICIENCY METHODS
+    # =========================================================================
+
+    def get_topic_proficiency(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        topic_id: str,
+        session: Optional[Session] = None,
+    ) -> Optional[StoredTopicProficiency]:
+        """Get proficiency row by user+exam+topic."""
+        if session is not None:
+            row = (
+                session.query(TopicProficiency)
+                .filter(
+                    TopicProficiency.user_id == user_id,
+                    TopicProficiency.exam_id == exam_id,
+                    TopicProficiency.topic_id == topic_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredTopicProficiency(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                topic_id=row.topic_id,
+                proficiency=float(row.proficiency),
+                current_difficulty=int(row.current_difficulty),
+                streak_up=int(row.streak_up),
+                streak_down=int(row.streak_down),
+                seen_count=int(row.seen_count),
+                correctish_count=int(row.correctish_count),
+                last_updated_at=_datetime_to_str(row.last_updated_at),
+                info=row.info or {},
+            )
+
+        with get_db() as db:
+            row = (
+                db.query(TopicProficiency)
+                .filter(
+                    TopicProficiency.user_id == user_id,
+                    TopicProficiency.exam_id == exam_id,
+                    TopicProficiency.topic_id == topic_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredTopicProficiency(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                topic_id=row.topic_id,
+                proficiency=float(row.proficiency),
+                current_difficulty=int(row.current_difficulty),
+                streak_up=int(row.streak_up),
+                streak_down=int(row.streak_down),
+                seen_count=int(row.seen_count),
+                correctish_count=int(row.correctish_count),
+                last_updated_at=_datetime_to_str(row.last_updated_at),
+                info=row.info or {},
+            )
+
+    def upsert_topic_proficiency(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        topic_id: str,
+        proficiency: float,
+        current_difficulty: int,
+        streak_up: int,
+        streak_down: int,
+        seen_count: int,
+        correctish_count: int,
+        info: Optional[Dict[str, Any]] = None,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Insert/update topic proficiency row."""
+        if session is not None:
+            row = (
+                session.query(TopicProficiency)
+                .filter(
+                    TopicProficiency.user_id == user_id,
+                    TopicProficiency.exam_id == exam_id,
+                    TopicProficiency.topic_id == topic_id,
+                )
+                .first()
+            )
+            if row:
+                row.proficiency = proficiency
+                row.current_difficulty = current_difficulty
+                row.streak_up = streak_up
+                row.streak_down = streak_down
+                row.seen_count = seen_count
+                row.correctish_count = correctish_count
+                row.info = info or {}
+            else:
+                session.add(
+                    TopicProficiency(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        topic_id=topic_id,
+                        proficiency=proficiency,
+                        current_difficulty=current_difficulty,
+                        streak_up=streak_up,
+                        streak_down=streak_down,
+                        seen_count=seen_count,
+                        correctish_count=correctish_count,
+                        info=info or {},
+                    )
+                )
+            return
+
+        with get_db() as db:
+            row = (
+                db.query(TopicProficiency)
+                .filter(
+                    TopicProficiency.user_id == user_id,
+                    TopicProficiency.exam_id == exam_id,
+                    TopicProficiency.topic_id == topic_id,
+                )
+                .first()
+            )
+            if row:
+                row.proficiency = proficiency
+                row.current_difficulty = current_difficulty
+                row.streak_up = streak_up
+                row.streak_down = streak_down
+                row.seen_count = seen_count
+                row.correctish_count = correctish_count
+                row.info = info or {}
+            else:
+                db.add(
+                    TopicProficiency(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        topic_id=topic_id,
+                        proficiency=proficiency,
+                        current_difficulty=current_difficulty,
+                        streak_up=streak_up,
+                        streak_down=streak_down,
+                        seen_count=seen_count,
+                        correctish_count=correctish_count,
+                        info=info or {},
+                    )
+                )
+
+    def list_topic_proficiencies(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+    ) -> List[StoredTopicProficiency]:
+        """List all topic proficiencies for a user/exam."""
+        with get_db() as db:
+            rows = (
+                db.query(TopicProficiency)
+                .filter(
+                    TopicProficiency.user_id == user_id,
+                    TopicProficiency.exam_id == exam_id,
+                )
+                .order_by(TopicProficiency.topic_id.asc())
+                .all()
+            )
+            return [
+                StoredTopicProficiency(
+                    user_id=r.user_id,
+                    exam_id=r.exam_id,
+                    topic_id=r.topic_id,
+                    proficiency=float(r.proficiency),
+                    current_difficulty=int(r.current_difficulty),
+                    streak_up=int(r.streak_up),
+                    streak_down=int(r.streak_down),
+                    seen_count=int(r.seen_count),
+                    correctish_count=int(r.correctish_count),
+                    last_updated_at=_datetime_to_str(r.last_updated_at),
+                    info=r.info or {},
+                )
+                for r in rows
+            ]
+
+    # =========================================================================
+    # SESSION STATE + PRESENTATION LOG METHODS
+    # =========================================================================
+
+    def get_exam_session_state(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        session: Optional[Session] = None,
+    ) -> Optional[StoredExamSessionState]:
+        """Get user exam session state."""
+        if session is not None:
+            row = (
+                session.query(ExamSessionState)
+                .filter(
+                    ExamSessionState.user_id == user_id,
+                    ExamSessionState.exam_id == exam_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredExamSessionState(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                last_served_card_id=row.last_served_card_id,
+                last_presented_at=_datetime_to_str(row.last_presented_at),
+                updated_at=_datetime_to_str(row.updated_at),
+            )
+
+        with get_db() as db:
+            row = (
+                db.query(ExamSessionState)
+                .filter(
+                    ExamSessionState.user_id == user_id,
+                    ExamSessionState.exam_id == exam_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredExamSessionState(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                last_served_card_id=row.last_served_card_id,
+                last_presented_at=_datetime_to_str(row.last_presented_at),
+                updated_at=_datetime_to_str(row.updated_at),
+            )
+
+    def upsert_exam_session_state(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        last_served_card_id: Optional[str],
+        last_presented_at: Optional[datetime],
+        session: Optional[Session] = None,
+    ) -> None:
+        """Insert/update user exam session pointer state."""
+        if session is not None:
+            row = (
+                session.query(ExamSessionState)
+                .filter(
+                    ExamSessionState.user_id == user_id,
+                    ExamSessionState.exam_id == exam_id,
+                )
+                .first()
+            )
+            if row:
+                row.last_served_card_id = last_served_card_id
+                row.last_presented_at = last_presented_at
+            else:
+                session.add(
+                    ExamSessionState(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        last_served_card_id=last_served_card_id,
+                        last_presented_at=last_presented_at,
+                    )
+                )
+            return
+
+        with get_db() as db:
+            row = (
+                db.query(ExamSessionState)
+                .filter(
+                    ExamSessionState.user_id == user_id,
+                    ExamSessionState.exam_id == exam_id,
+                )
+                .first()
+            )
+            if row:
+                row.last_served_card_id = last_served_card_id
+                row.last_presented_at = last_presented_at
+            else:
+                db.add(
+                    ExamSessionState(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        last_served_card_id=last_served_card_id,
+                        last_presented_at=last_presented_at,
+                    )
+                )
+
+    def append_card_presentation(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        card_id: str,
+        presented_at: Optional[datetime] = None,
+        info: Optional[Dict[str, Any]] = None,
+        session: Optional[Session] = None,
+    ) -> StoredCardPresentation:
+        """Append next card presentation entry atomically for user+exam."""
+        presented_at = presented_at or datetime.now(timezone.utc)
+
+        if session is not None:
+            max_seq = (
+                session.query(func.max(CardPresentationLog.sequence_no))
+                .filter(
+                    CardPresentationLog.user_id == user_id,
+                    CardPresentationLog.exam_id == exam_id,
+                )
+                .scalar()
+            )
+            next_seq = int(max_seq or 0) + 1
+            session.add(
+                CardPresentationLog(
+                    user_id=user_id,
+                    exam_id=exam_id,
+                    sequence_no=next_seq,
+                    card_id=card_id,
+                    presented_at=presented_at,
+                    info=info or {},
+                )
+            )
+            return StoredCardPresentation(
+                user_id=user_id,
+                exam_id=exam_id,
+                sequence_no=next_seq,
+                card_id=card_id,
+                presented_at=_datetime_to_str(presented_at),
+                info=info or {},
+            )
+
+        with get_db() as db:
+            max_seq = (
+                db.query(func.max(CardPresentationLog.sequence_no))
+                .filter(
+                    CardPresentationLog.user_id == user_id,
+                    CardPresentationLog.exam_id == exam_id,
+                )
+                .scalar()
+            )
+            next_seq = int(max_seq or 0) + 1
+            db.add(
+                CardPresentationLog(
+                    user_id=user_id,
+                    exam_id=exam_id,
+                    sequence_no=next_seq,
+                    card_id=card_id,
+                    presented_at=presented_at,
+                    info=info or {},
+                )
+            )
+            return StoredCardPresentation(
+                user_id=user_id,
+                exam_id=exam_id,
+                sequence_no=next_seq,
+                card_id=card_id,
+                presented_at=_datetime_to_str(presented_at),
+                info=info or {},
+            )
+
+    def get_latest_presentation(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+    ) -> Optional[StoredCardPresentation]:
+        """Get latest presented card entry."""
+        with get_db() as db:
+            row = (
+                db.query(CardPresentationLog)
+                .filter(
+                    CardPresentationLog.user_id == user_id,
+                    CardPresentationLog.exam_id == exam_id,
+                )
+                .order_by(CardPresentationLog.sequence_no.desc())
+                .first()
+            )
+            if not row:
+                return None
+            return StoredCardPresentation(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                sequence_no=int(row.sequence_no),
+                card_id=row.card_id,
+                presented_at=_datetime_to_str(row.presented_at),
+                info=row.info or {},
+            )
+
+    def get_previous_presentation(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        current_sequence_no: int,
+    ) -> Optional[StoredCardPresentation]:
+        """Get immediately previous presentation entry by sequence number."""
+        with get_db() as db:
+            row = (
+                db.query(CardPresentationLog)
+                .filter(
+                    CardPresentationLog.user_id == user_id,
+                    CardPresentationLog.exam_id == exam_id,
+                    CardPresentationLog.sequence_no < current_sequence_no,
+                )
+                .order_by(CardPresentationLog.sequence_no.desc())
+                .first()
+            )
+            if not row:
+                return None
+            return StoredCardPresentation(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                sequence_no=int(row.sequence_no),
+                card_id=row.card_id,
+                presented_at=_datetime_to_str(row.presented_at),
+                info=row.info or {},
+            )
+
+    def list_presentations(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        ascending: bool = True,
+        limit: int = 500,
+    ) -> List[StoredCardPresentation]:
+        """List card presentation history for a user/exam."""
+        with get_db() as db:
+            q = db.query(CardPresentationLog).filter(
+                CardPresentationLog.user_id == user_id,
+                CardPresentationLog.exam_id == exam_id,
+            )
+            if ascending:
+                q = q.order_by(CardPresentationLog.sequence_no.asc())
+            else:
+                q = q.order_by(CardPresentationLog.sequence_no.desc())
+            rows = q.limit(limit).all()
+            return [
+                StoredCardPresentation(
+                    user_id=row.user_id,
+                    exam_id=row.exam_id,
+                    sequence_no=int(row.sequence_no),
+                    card_id=row.card_id,
+                    presented_at=_datetime_to_str(row.presented_at),
+                    info=row.info or {},
+                )
+                for row in rows
+            ]
+
+    # =========================================================================
+    # CARD REVIEW METHODS
+    # =========================================================================
+
+    def add_card_review(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        card_id: str,
+        topic_id: str,
+        rating: str,
+        info: Optional[Dict[str, Any]] = None,
+        review_id: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> str:
+        """Insert a card review row and return review_id."""
+        rid = review_id or uuid.uuid4().hex[:20]
+        if session is not None:
+            session.add(
+                CardReview(
+                    review_id=rid,
+                    user_id=user_id,
+                    exam_id=exam_id,
+                    card_id=card_id,
+                    topic_id=topic_id,
+                    rating=rating,
+                    info=info or {},
+                )
+            )
+            return rid
+        with get_db() as db:
+            db.add(
+                CardReview(
+                    review_id=rid,
+                    user_id=user_id,
+                    exam_id=exam_id,
+                    card_id=card_id,
+                    topic_id=topic_id,
+                    rating=rating,
+                    info=info or {},
+                )
+            )
+        return rid
+
+    def get_card_review_by_idempotency_key(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        card_id: str,
+        idempotency_key: str,
+        session: Optional[Session] = None,
+    ) -> Optional[str]:
+        """Return existing review_id for a matching idempotency key."""
+        if not idempotency_key:
+            return None
+        if session is not None:
+            row = (
+                session.query(CardReview)
+                .filter(
+                    CardReview.user_id == user_id,
+                    CardReview.exam_id == exam_id,
+                    CardReview.card_id == card_id,
+                )
+                .all()
+            )
+            for r in row:
+                info = r.info or {}
+                if str(info.get("idempotency_key") or "") == idempotency_key:
+                    return r.review_id
+            return None
+
+        with get_db() as db:
+            row = (
+                db.query(CardReview)
+                .filter(
+                    CardReview.user_id == user_id,
+                    CardReview.exam_id == exam_id,
+                    CardReview.card_id == card_id,
+                )
+                .all()
+            )
+            for r in row:
+                info = r.info or {}
+                if str(info.get("idempotency_key") or "") == idempotency_key:
+                    return r.review_id
+            return None
 
     # =========================================================================
     # QUESTION INDEX METHODS (SQL audit/source-of-truth)

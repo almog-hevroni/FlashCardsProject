@@ -581,9 +581,9 @@ Index(
     unique=True,
     sqlite_where=text("role = 'primary'"),
 )
-Index(
-    "uq_card_topics_primary_per_card_postgres",
-    CardTopic.card_id,
-    unique=True,
-    postgresql_where=text("role = 'primary'"),
-)
+# Index(
+#     "uq_card_topics_primary_per_card_postgres",
+#     CardTopic.card_id,
+#     unique=True,
+#     postgresql_where=text("role = 'primary'"),
+# )

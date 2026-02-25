@@ -206,8 +206,8 @@ def main():
     try:
         _run(args, store)
     finally:
-        store.db.close()
-
+        # store.db.close();
+        pass
 
 def _run(args, store):
     # === DEMO MODE: Full automated flow with beautiful output ===
