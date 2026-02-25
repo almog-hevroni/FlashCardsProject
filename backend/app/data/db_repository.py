@@ -26,6 +26,7 @@ from app.data.models import (
     Exam, ExamDocument, Topic, TopicChunk, TopicEvidence, TopicVector,
     Card, CardProof, CardReview, CardTopic, CardScheduling, TopicProficiency,
     ExamSessionState, CardPresentationLog, Event, QuestionIndexEntry,
+    StudentKnowledgeState,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,11 @@ class StoredExam:
     created_at: str
     updated_at: str
     info: Dict[str, Any]
+    state: str = "diagnostic"
+    diagnostic_total: int = 0
+    diagnostic_answered: int = 0
+    diagnostic_started_at: str = ""
+    diagnostic_completed_at: str = ""
 
 
 @dataclass
@@ -76,6 +82,7 @@ class StoredCard:
     created_at: str
     status: str
     info: Dict[str, Any]
+    card_type: str = "learning"
 
 
 @dataclass
@@ -397,8 +404,32 @@ class DBRepository:
             if exam:
                 exam.updated_at = datetime.now(timezone.utc)
     
-    def get_exam(self, exam_id: str) -> Optional[StoredExam]:
+    def get_exam(
+        self,
+        exam_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> Optional[StoredExam]:
         """Get exam by ID."""
+        if session is not None:
+            exam = session.query(Exam).filter(Exam.exam_id == exam_id).first()
+            if not exam:
+                return None
+            return StoredExam(
+                exam_id=exam.exam_id,
+                user_id=exam.user_id,
+                title=exam.title,
+                mode=exam.mode,
+                created_at=_datetime_to_str(exam.created_at),
+                updated_at=_datetime_to_str(exam.updated_at),
+                info=exam.info or {},
+                state=exam.state,
+                diagnostic_total=int(exam.diagnostic_total or 0),
+                diagnostic_answered=int(exam.diagnostic_answered or 0),
+                diagnostic_started_at=_datetime_to_str(exam.diagnostic_started_at),
+                diagnostic_completed_at=_datetime_to_str(exam.diagnostic_completed_at),
+            )
+
         with get_db() as db:
             exam = db.query(Exam).filter(Exam.exam_id == exam_id).first()
             if not exam:
@@ -411,6 +442,11 @@ class DBRepository:
                 created_at=_datetime_to_str(exam.created_at),
                 updated_at=_datetime_to_str(exam.updated_at),
                 info=exam.info or {},
+                state=exam.state,
+                diagnostic_total=int(exam.diagnostic_total or 0),
+                diagnostic_answered=int(exam.diagnostic_answered or 0),
+                diagnostic_started_at=_datetime_to_str(exam.diagnostic_started_at),
+                diagnostic_completed_at=_datetime_to_str(exam.diagnostic_completed_at),
             )
     
     def list_exams(self, *, user_id: str, limit: int = 50) -> List[StoredExam]:
@@ -428,9 +464,76 @@ class DBRepository:
                     created_at=_datetime_to_str(e.created_at),
                     updated_at=_datetime_to_str(e.updated_at),
                     info=e.info or {},
+                    state=e.state,
+                    diagnostic_total=int(e.diagnostic_total or 0),
+                    diagnostic_answered=int(e.diagnostic_answered or 0),
+                    diagnostic_started_at=_datetime_to_str(e.diagnostic_started_at),
+                    diagnostic_completed_at=_datetime_to_str(e.diagnostic_completed_at),
                 )
                 for e in exams
             ]
+
+    def update_exam_lifecycle(
+        self,
+        *,
+        exam_id: str,
+        state: Optional[str] = None,
+        diagnostic_total: Optional[int] = None,
+        diagnostic_answered: Optional[int] = None,
+        diagnostic_started_at: Optional[datetime] = None,
+        diagnostic_completed_at: Optional[datetime] = None,
+        info_patch: Optional[Dict[str, Any]] = None,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Update exam lifecycle fields and optionally merge info payload."""
+
+        def _apply(db: Session) -> None:
+            row = db.query(Exam).filter(Exam.exam_id == exam_id).first()
+            if row is None:
+                raise ValueError(f"Exam not found: {exam_id}")
+            if state is not None:
+                row.state = state
+            if diagnostic_total is not None:
+                row.diagnostic_total = max(0, int(diagnostic_total))
+            if diagnostic_answered is not None:
+                row.diagnostic_answered = max(0, int(diagnostic_answered))
+            if diagnostic_started_at is not None:
+                row.diagnostic_started_at = diagnostic_started_at
+            if diagnostic_completed_at is not None:
+                row.diagnostic_completed_at = diagnostic_completed_at
+            if info_patch:
+                merged = dict(row.info or {})
+                merged.update(info_patch)
+                row.info = merged
+            row.updated_at = datetime.now(timezone.utc)
+
+        if session is not None:
+            _apply(session)
+            return
+        with get_db() as db:
+            _apply(db)
+
+    def increment_exam_diagnostic_answered(
+        self,
+        *,
+        exam_id: str,
+        by: int = 1,
+        session: Optional[Session] = None,
+    ) -> int:
+        """Increment exam diagnostic_answered and return the new value."""
+
+        def _apply(db: Session) -> int:
+            row = db.query(Exam).filter(Exam.exam_id == exam_id).first()
+            if row is None:
+                raise ValueError(f"Exam not found: {exam_id}")
+            row.diagnostic_answered = max(0, int(row.diagnostic_answered or 0) + int(by))
+            row.updated_at = datetime.now(timezone.utc)
+            return int(row.diagnostic_answered)
+
+        if session is not None:
+            return _apply(session)
+        with get_db() as db:
+            return _apply(db)
     
     def attach_documents_to_exam(self, *, exam_id: str, doc_ids: Sequence[str]) -> None:
         """Attach documents to an exam."""
@@ -454,6 +557,119 @@ class DBRepository:
                 ExamDocument.exam_id == exam_id
             ).order_by(ExamDocument.added_at).all()
             return [d.doc_id for d in docs]
+
+    def delete_exam_cascade(self, *, exam_id: str) -> None:
+        """
+        Delete an exam and all related exam-scoped rows.
+
+        This is intended for compensation cleanup when bootstrap fails.
+        """
+        with get_db() as db:
+            exam = db.query(Exam).filter(Exam.exam_id == exam_id).first()
+            if exam is None:
+                return
+
+            # Resolve document IDs currently linked to this exam.
+            doc_ids = [
+                row.doc_id
+                for row in db.query(ExamDocument)
+                .filter(ExamDocument.exam_id == exam_id)
+                .all()
+            ]
+
+            # Card-scoped tables.
+            card_ids = [
+                row.card_id
+                for row in db.query(Card).filter(Card.exam_id == exam_id).all()
+            ]
+            if card_ids:
+                db.query(CardProof).filter(CardProof.card_id.in_(card_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(CardScheduling).filter(CardScheduling.card_id.in_(card_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(CardTopic).filter(CardTopic.card_id.in_(card_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(CardReview).filter(CardReview.card_id.in_(card_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(CardPresentationLog).filter(
+                    CardPresentationLog.exam_id == exam_id
+                ).delete(synchronize_session=False)
+                db.query(Card).filter(Card.card_id.in_(card_ids)).delete(
+                    synchronize_session=False
+                )
+
+            # Topic-scoped tables.
+            topic_ids = [
+                row.topic_id
+                for row in db.query(Topic).filter(Topic.exam_id == exam_id).all()
+            ]
+            if topic_ids:
+                db.query(TopicEvidence).filter(TopicEvidence.topic_id.in_(topic_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(TopicChunk).filter(TopicChunk.topic_id.in_(topic_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(TopicVector).filter(TopicVector.topic_id.in_(topic_ids)).delete(
+                    synchronize_session=False
+                )
+                db.query(StudentKnowledgeState).filter(
+                    StudentKnowledgeState.exam_id == exam_id
+                ).delete(synchronize_session=False)
+                db.query(TopicProficiency).filter(
+                    TopicProficiency.exam_id == exam_id
+                ).delete(synchronize_session=False)
+                db.query(Topic).filter(Topic.topic_id.in_(topic_ids)).delete(
+                    synchronize_session=False
+                )
+
+            # Remaining exam-scoped tables.
+            db.query(QuestionIndexEntry).filter(
+                QuestionIndexEntry.exam_id == exam_id
+            ).delete(synchronize_session=False)
+            db.query(Event).filter(Event.exam_id == exam_id).delete(
+                synchronize_session=False
+            )
+            db.query(ExamSessionState).filter(
+                ExamSessionState.exam_id == exam_id
+            ).delete(synchronize_session=False)
+            db.query(ExamDocument).filter(ExamDocument.exam_id == exam_id).delete(
+                synchronize_session=False
+            )
+            db.query(Exam).filter(Exam.exam_id == exam_id).delete(
+                synchronize_session=False
+            )
+
+            # Best-effort document/chunk cleanup for docs no longer attached anywhere.
+            if doc_ids:
+                still_attached = {
+                    row.doc_id
+                    for row in db.query(ExamDocument.doc_id)
+                    .filter(ExamDocument.doc_id.in_(doc_ids))
+                    .all()
+                }
+                orphan_doc_ids = [d for d in doc_ids if d not in still_attached]
+                if orphan_doc_ids:
+                    orphan_chunk_ids = [
+                        row.chunk_id
+                        for row in db.query(Chunk.chunk_id)
+                        .filter(Chunk.doc_id.in_(orphan_doc_ids))
+                        .all()
+                    ]
+                    if orphan_chunk_ids:
+                        db.query(VectorIndexMap).filter(
+                            VectorIndexMap.chunk_id.in_(orphan_chunk_ids)
+                        ).delete(synchronize_session=False)
+                        db.query(Chunk).filter(Chunk.chunk_id.in_(orphan_chunk_ids)).delete(
+                            synchronize_session=False
+                        )
+                    db.query(Document).filter(Document.doc_id.in_(orphan_doc_ids)).delete(
+                        synchronize_session=False
+                    )
     
     # =========================================================================
     # TOPIC METHODS
@@ -631,6 +847,7 @@ class DBRepository:
         question: str,
         answer: str,
         difficulty: int = 1,
+        card_type: str = "learning",
         status: str = "active",
         info: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -643,6 +860,7 @@ class DBRepository:
                 card.question = question
                 card.answer = answer
                 card.difficulty = difficulty
+                card.card_type = card_type
                 card.status = status
                 card.info = info or {}
             else:
@@ -653,6 +871,7 @@ class DBRepository:
                     question=question,
                     answer=answer,
                     difficulty=difficulty,
+                    card_type=card_type,
                     status=status,
                     info=info or {},
                 ))
@@ -692,6 +911,7 @@ class DBRepository:
                     created_at=_datetime_to_str(c.created_at),
                     status=c.status,
                     info=c.info or {},
+                    card_type=c.card_type,
                 )
                 for c in cards
             ]
@@ -716,6 +936,7 @@ class DBRepository:
                     created_at=_datetime_to_str(c.created_at),
                     status=c.status,
                     info=c.info or {},
+                    card_type=c.card_type,
                 )
                 for c in cards
             ]
@@ -751,6 +972,7 @@ class DBRepository:
                 created_at=_datetime_to_str(c.created_at),
                 status=c.status,
                 info=c.info or {},
+                card_type=c.card_type,
             )
 
     # =========================================================================

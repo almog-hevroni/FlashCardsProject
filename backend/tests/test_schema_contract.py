@@ -26,7 +26,7 @@ from app.data.models import (
 )
 
 
-class Phase1SchemaContractTests(unittest.TestCase):
+class SchemaContractTests(unittest.TestCase):
     def setUp(self) -> None:
         drop_all_tables()
         init_db()
@@ -141,6 +141,30 @@ class Phase1SchemaContractTests(unittest.TestCase):
             self.assertEqual(proficiency.streak_down, 0)
             self.assertEqual(proficiency.seen_count, 0)
             self.assertEqual(proficiency.correctish_count, 0)
+
+    def test_repository_exam_lifecycle_contract_roundtrip(self) -> None:
+        from app.data.db_repository import DBRepository
+
+        repo = DBRepository(_TEST_ROOT / "meta.sqlite")
+        with SessionLocal() as db:
+            db.add(User(user_id="phase1-u2"))
+            db.commit()
+        exam_id = repo.create_exam(user_id="phase1-u2", title="Lifecycle contract")
+        now = datetime.now(timezone.utc)
+        repo.update_exam_lifecycle(
+            exam_id=exam_id,
+            state="active_learning",
+            diagnostic_total=3,
+            diagnostic_answered=2,
+            diagnostic_started_at=now,
+        )
+        updated = repo.get_exam(exam_id)
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated.state, "active_learning")
+        self.assertEqual(updated.diagnostic_total, 3)
+        self.assertEqual(updated.diagnostic_answered, 2)
+        self.assertTrue(updated.diagnostic_started_at)
 
 
 if __name__ == "__main__":

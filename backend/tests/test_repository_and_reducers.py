@@ -16,7 +16,7 @@ from app.services.review_state_reducer import ReviewStateReducer
 from app.services.topic_proficiency_state import TopicProficiencyStateService
 
 
-class Phase2RepositoryAndReducerTests(unittest.TestCase):
+class RepositoryAndReducerTests(unittest.TestCase):
     def setUp(self) -> None:
         drop_all_tables()
         init_db()

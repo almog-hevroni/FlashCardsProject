@@ -139,6 +139,7 @@ class CardGenState(TypedDict):
     topic_id: str
     topic_label: str
     difficulty: int
+    card_type: str
     allowed_chunk_ids: List[str]
     context_pack: str
     
@@ -342,12 +343,14 @@ def node_store_card(state: CardGenState) -> CardGenState:
         question=state["question"],
         answer=state["answer"],
         difficulty=state["difficulty"],
+        card_type=state["card_type"],
         status="active",
         info={
             "question_id": state.get("question_id"),
             "topic_label": state["topic_label"],
             "user_id": state["user_id"],
             "validation_score": state["validation_score"],
+            "card_type": state["card_type"],
         },
     )
     
@@ -537,6 +540,7 @@ def _run_question_phase(
     allowed_chunk_ids: List[str],
     context_pack: str,
     difficulty: int,
+    card_type: str,
     user_id: str,
     store: VectorStore,
 ) -> Optional[CardGenState]:
@@ -552,6 +556,7 @@ def _run_question_phase(
         "topic_id": topic_id,
         "topic_label": topic_label,
         "difficulty": difficulty,
+        "card_type": card_type,
         "allowed_chunk_ids": allowed_chunk_ids,
         "context_pack": context_pack,
         "question": None,
@@ -638,6 +643,7 @@ def generate_single_card(
     allowed_chunk_ids: List[str],
     context_pack: str,
     difficulty: int = 1,
+    card_type: str = "learning",
     user_id: str = "system",
     store: Optional[VectorStore] = None,
     stop_after_embedding: bool = False,
@@ -663,6 +669,7 @@ def generate_single_card(
         "topic_id": topic_id,
         "topic_label": topic_label,
         "difficulty": difficulty,
+        "card_type": card_type,
         "allowed_chunk_ids": allowed_chunk_ids,
         "context_pack": context_pack,
         "question": None,
@@ -697,6 +704,7 @@ def generate_starter_cards_v2(
     user_id: str,
     n: int = 5,
     difficulty: int = 1,
+    card_type: str = "learning",
     store: Optional[VectorStore] = None,
     max_workers: int = 5,
 ) -> List[GeneratedCard]:
@@ -760,6 +768,7 @@ def generate_starter_cards_v2(
             allowed_chunk_ids=ctx["allowed_chunk_ids"],
             context_pack=ctx["context_pack"],
             difficulty=difficulty,
+            card_type=card_type,
             user_id=user_id,
             store=store,
         )
