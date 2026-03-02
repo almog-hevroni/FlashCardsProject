@@ -72,6 +72,17 @@ class StoredTopic:
 
 
 @dataclass
+class StoredTopicEvidence:
+    evidence_id: str
+    topic_id: str
+    doc_id: str
+    page: Optional[int]
+    start: int
+    end: int
+    text: str
+
+
+@dataclass
 class StoredCard:
     card_id: str
     exam_id: str
@@ -83,6 +94,18 @@ class StoredCard:
     status: str
     info: Dict[str, Any]
     card_type: str = "learning"
+
+
+@dataclass
+class StoredCardProof:
+    proof_id: str
+    card_id: str
+    doc_id: str
+    page: Optional[int]
+    start: int
+    end: int
+    text: str
+    score: float
 
 
 @dataclass
@@ -784,6 +807,28 @@ class DBRepository:
                     end=int(ev.get("end") or 0),
                     text=str(ev.get("text") or ""),
                 ))
+
+    def list_topic_evidence(self, *, topic_id: str) -> List[StoredTopicEvidence]:
+        """List evidence spans for a topic."""
+        with get_db() as db:
+            rows = (
+                db.query(TopicEvidence)
+                .filter(TopicEvidence.topic_id == topic_id)
+                .order_by(TopicEvidence.doc_id.asc(), TopicEvidence.page.asc(), TopicEvidence.start.asc())
+                .all()
+            )
+            return [
+                StoredTopicEvidence(
+                    evidence_id=r.evidence_id,
+                    topic_id=r.topic_id,
+                    doc_id=r.doc_id,
+                    page=r.page,
+                    start=int(r.start or 0),
+                    end=int(r.end or 0),
+                    text=r.text or "",
+                )
+                for r in rows
+            ]
     
     # =========================================================================
     # TOPIC VECTOR METHODS
@@ -893,6 +938,29 @@ class DBRepository:
                     text=str(p.get("text") or ""),
                     score=float(p.get("score") or 0.0),
                 ))
+
+    def list_card_proofs(self, *, card_id: str) -> List[StoredCardProof]:
+        """List proofs for a card."""
+        with get_db() as db:
+            rows = (
+                db.query(CardProof)
+                .filter(CardProof.card_id == card_id)
+                .order_by(CardProof.doc_id.asc(), CardProof.page.asc(), CardProof.start.asc())
+                .all()
+            )
+            return [
+                StoredCardProof(
+                    proof_id=r.proof_id,
+                    card_id=r.card_id,
+                    doc_id=r.doc_id,
+                    page=r.page,
+                    start=int(r.start or 0),
+                    end=int(r.end or 0),
+                    text=r.text or "",
+                    score=float(r.score or 0.0),
+                )
+                for r in rows
+            ]
     
     def list_cards_for_exam(self, *, exam_id: str, limit: int = 200) -> List[StoredCard]:
         """List cards for an exam."""
@@ -1213,10 +1281,10 @@ class DBRepository:
             rows = (
                 db.query(CardScheduling)
                 .join(Card, Card.card_id == CardScheduling.card_id)
-                .join(Topic, Topic.topic_id == Card.topic_id)
+                .join(Exam, Exam.exam_id == Card.exam_id)
                 .filter(
+                    Exam.user_id == user_id,
                     Card.exam_id == exam_id,
-                    Topic.exam_id == exam_id,
                     CardScheduling.due_at <= cutoff,
                     Card.status == "active",
                 )
@@ -1254,9 +1322,14 @@ class DBRepository:
             rows = (
                 db.query(CardScheduling)
                 .join(Card, Card.card_id == CardScheduling.card_id)
-                .filter(Card.exam_id == exam_id, CardScheduling.state == state)
+                .filter(
+                    Card.exam_id == exam_id,
+                    CardScheduling.state == state,
+                    Card.status == "active",
+                )
                 .order_by(
                     CardScheduling.due_at.asc(),
+                    CardScheduling.lapses.desc(),
                     CardScheduling.card_id.asc(),
                 )
                 .limit(limit)

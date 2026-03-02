@@ -1,24 +1,40 @@
 try:
-    from fastapi import FastAPI, UploadFile, File, Form, Header  # type: ignore
+    from fastapi import Body, FastAPI, File, Form, Header, Query, Request, UploadFile  # type: ignore
     from fastapi.responses import JSONResponse  # type: ignore
 except Exception as exc:
     raise ImportError(
         "FastAPI is required but not installed. Install it with 'pip install fastapi uvicorn'."
     ) from exc
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-import shutil
-from datetime import datetime, timezone
 
-from app.services.ingestion import ingest_documents
-from app.data.vector_store import VectorStore
-from app.services.qa import generate_answer
-from app.services.exams import attach_documents, ImmutableExamError
-from app.services.diagnostic_lifecycle import (
-    DiagnosticBootstrapError,
-    DiagnosticLifecycleService,
+from datetime import datetime, timezone
+from pathlib import Path
+import shutil
+from typing import Any, Dict, List, Optional
+
+from app.api.schemas import (
+    CardListResponse,
+    CardResponse,
+    ExamListResponse,
+    ExamResponse,
+    GenerateSingleCardRequest,
+    GenerateSingleCardResponse,
+    NextCardResponse,
+    ProofSpan,
+    ReviewCardRequest,
+    SessionEventRequest,
+    SessionEventResponse,
+    TopicListResponse,
+    TopicProgressResponse,
+    TopicProficiencyResponse,
+    TopicResponse,
 )
-from app.services.diagnostic_review_reducer import DiagnosticReviewReducer
+from app.data.vector_store import VectorStore
+from app.services.diagnostic_lifecycle import DiagnosticBootstrapError, DiagnosticLifecycleService
+from app.services.exams import ImmutableExamError
+from app.services.graph import generate_single_card
+from app.services.review_service import ReviewService
+from app.services.session_planner import SessionPlannerService
+from app.services.context_packs import build_diverse_chunk_pack
 
 app = FastAPI(title="DocQA Proto")
 
@@ -45,6 +61,61 @@ def _extract_uploaded_files(files: List[UploadFile]) -> tuple[List[Path], List[s
         temp_paths.append(temp_path)
         filenames.append(file.filename)
     return temp_paths, filenames
+
+
+def _card_to_response(store: VectorStore, card_id: str) -> Optional[CardResponse]:
+    card = store.db.get_card(card_id=card_id)
+    if card is None:
+        return None
+    topic_map = {t.topic_id: t.label for t in store.db.list_topics(exam_id=card.exam_id)}
+    proofs = [
+        ProofSpan(
+            proof_id=p.proof_id,
+            doc_id=p.doc_id,
+            page=p.page,
+            start=p.start,
+            end=p.end,
+            text=p.text,
+            score=float(p.score or 0.0),
+        )
+        for p in store.db.list_card_proofs(card_id=card.card_id)
+    ]
+    return CardResponse(
+        card_id=card.card_id,
+        exam_id=card.exam_id,
+        topic_id=card.topic_id,
+        topic_label=topic_map.get(card.topic_id),
+        question=card.question,
+        answer=card.answer,
+        difficulty=int(card.difficulty),
+        created_at=card.created_at,
+        status=card.status,
+        proofs=proofs,
+        info=card.info or {},
+    )
+
+
+def _exam_to_response(exam: Any) -> ExamResponse:
+    info = dict(exam.info or {})
+    info.update(
+        {
+            "state": exam.state,
+            "diagnostic_total": exam.diagnostic_total,
+            "diagnostic_answered": exam.diagnostic_answered,
+            "diagnostic_started_at": exam.diagnostic_started_at,
+            "diagnostic_completed_at": exam.diagnostic_completed_at,
+        }
+    )
+    return ExamResponse(
+        exam_id=exam.exam_id,
+        user_id=exam.user_id,
+        title=exam.title,
+        mode=exam.mode,
+        created_at=exam.created_at,
+        updated_at=exam.updated_at,
+        info=info,
+    )
+
 
 @app.post("/exams/from-upload")
 async def create_exam_from_upload_endpoint(
@@ -84,8 +155,18 @@ async def create_exam_from_upload_endpoint(
     }
 
 
+@app.get("/exams", response_model=ExamListResponse)
+async def list_exams_endpoint(
+    user_id: str = Query(...),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    store = VectorStore()
+    exams = store.db.list_exams(user_id=user_id, limit=limit)
+    return ExamListResponse(exams=[_exam_to_response(x) for x in exams])
+
+
 @app.get("/exams/{exam_id}")
-async def get_exam_endpoint(exam_id: str, user_id: str):
+async def get_exam_endpoint(exam_id: str, user_id: str = Query(...)):
     store = VectorStore()
     exam = store.db.get_exam(exam_id)
     if exam is None:
@@ -108,22 +189,173 @@ async def get_exam_endpoint(exam_id: str, user_id: str):
     }
 
 
+@app.get("/exams/{exam_id}/topics", response_model=TopicListResponse)
+async def list_topics_endpoint(exam_id: str):
+    store = VectorStore()
+    rows = store.db.list_topics(exam_id=exam_id)
+    topics: List[TopicResponse] = []
+    for t in rows:
+        topics.append(
+            TopicResponse(
+                topic_id=t.topic_id,
+                exam_id=t.exam_id,
+                label=t.label,
+                created_at=t.created_at,
+                n_chunks=int(t.info.get("n_chunks") or 0),
+                info=t.info or {},
+            )
+        )
+    return TopicListResponse(exam_id=exam_id, topics=topics)
+
+
+@app.post("/exams/{exam_id}/topics/{topic_id}/cards/generate", response_model=GenerateSingleCardResponse)
+async def generate_single_card_endpoint(exam_id: str, topic_id: str, req: GenerateSingleCardRequest):
+    store = VectorStore()
+    topic_map = {t.topic_id: t for t in store.db.list_topics(exam_id=exam_id)}
+    topic = topic_map.get(topic_id)
+    if topic is None:
+        return GenerateSingleCardResponse(card=None, error=f"Topic not found: {topic_id}")
+    chunk_ids = store.db.list_chunk_ids_for_topic(topic_id=topic_id)
+    if not chunk_ids:
+        return GenerateSingleCardResponse(card=None, error="Topic has no chunks")
+    try:
+        context_pack = build_diverse_chunk_pack(
+            store=store,
+            chunk_ids=chunk_ids,
+            centroid=store.db.get_topic_vector(topic_id=topic_id),
+        )
+        card = generate_single_card(
+            exam_id=exam_id,
+            topic_id=topic_id,
+            topic_label=topic.label,
+            allowed_chunk_ids=chunk_ids,
+            context_pack=context_pack,
+            difficulty=req.difficulty,
+            card_type="learning",
+            user_id=req.user_id,
+            store=store,
+        )
+    except Exception as exc:
+        return GenerateSingleCardResponse(card=None, error=str(exc))
+    if card is None:
+        return GenerateSingleCardResponse(card=None, error="Could not generate card")
+    payload = _card_to_response(store, card.card_id)
+    return GenerateSingleCardResponse(card=payload, error=None)
+
+
+@app.get("/exams/{exam_id}/cards", response_model=CardListResponse)
+async def list_cards_endpoint(
+    exam_id: str,
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    store = VectorStore()
+    rows = store.db.list_cards_for_exam(exam_id=exam_id, limit=limit)
+    cards: List[CardResponse] = []
+    for row in rows:
+        payload = _card_to_response(store, row.card_id)
+        if payload is not None:
+            cards.append(payload)
+    return CardListResponse(cards=cards, total=len(cards))
+
+
+@app.get("/exams/{exam_id}/session/next-card", response_model=NextCardResponse)
+async def next_card_endpoint(exam_id: str, user_id: str = Query(...)):
+    store = VectorStore()
+    exam = store.db.get_exam(exam_id)
+    if exam is None:
+        return JSONResponse({"error": f"Exam not found: {exam_id}"}, status_code=404)
+    if exam.user_id != user_id:
+        return JSONResponse({"error": "Exam does not belong to user"}, status_code=403)
+
+    planner = SessionPlannerService(repo=store.db)
+    planned = planner.plan_next_card(user_id=user_id, exam_id=exam_id)
+    if planned is None:
+        return NextCardResponse(card=None, reason=None, no_cards_available=True, message="No cards available")
+
+    now = datetime.now(timezone.utc)
+    store.db.upsert_exam_session_state(
+        user_id=user_id,
+        exam_id=exam_id,
+        last_served_card_id=planned.card_id,
+        last_presented_at=now,
+    )
+    store.db.append_card_presentation(
+        user_id=user_id,
+        exam_id=exam_id,
+        card_id=planned.card_id,
+        presented_at=now,
+        info={"source": "session_planner", "reason": planned.reason},
+    )
+    card = _card_to_response(store, planned.card_id)
+    return NextCardResponse(card=card, reason=planned.reason, no_cards_available=False, message=None)
+
+
+@app.get("/exams/{exam_id}/session/previous-card", response_model=NextCardResponse)
+async def previous_card_endpoint(exam_id: str, user_id: str = Query(...)):
+    store = VectorStore()
+    latest = store.db.get_latest_presentation(user_id=user_id, exam_id=exam_id)
+    if latest is None:
+        return NextCardResponse(card=None, reason=None, no_cards_available=True, message="No previous card")
+    prev = store.db.get_previous_presentation(
+        user_id=user_id,
+        exam_id=exam_id,
+        current_sequence_no=latest.sequence_no,
+    )
+    if prev is None:
+        return NextCardResponse(card=None, reason=None, no_cards_available=True, message="No previous card")
+    card = _card_to_response(store, prev.card_id)
+    return NextCardResponse(card=card, reason="previous", no_cards_available=False, message=None)
+
+
+@app.get("/exams/{exam_id}/cards/presented-history", response_model=CardListResponse)
+async def presented_history_endpoint(
+    exam_id: str,
+    user_id: str = Query(...),
+    limit: int = Query(default=500, ge=1, le=1000),
+):
+    store = VectorStore()
+    rows = store.db.list_presentations(user_id=user_id, exam_id=exam_id, ascending=False, limit=limit)
+    cards: List[CardResponse] = []
+    for row in rows:
+        payload = _card_to_response(store, row.card_id)
+        if payload is not None:
+            cards.append(payload)
+    return CardListResponse(cards=cards, total=len(cards))
+
+
 @app.post("/exams/{exam_id}/cards/{card_id}/review")
 async def review_card_endpoint(
     exam_id: str,
     card_id: str,
-    user_id: str = Form(...),
-    rating: str = Form(...),
+    request: Request,
+    body: Optional[ReviewCardRequest] = Body(default=None),
+    user_id: Optional[str] = Form(default=None),
+    rating: Optional[str] = Form(default=None),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
-    key = (idempotency_key or "").strip() or f"{user_id}:{exam_id}:{card_id}:{rating}:{datetime.now(timezone.utc).isoformat()}"
-    reducer = DiagnosticReviewReducer()
+    parsed_user_id = user_id
+    parsed_rating = rating
+    if body is not None:
+        parsed_user_id = body.user_id
+        parsed_rating = body.rating
+    if not parsed_user_id or not parsed_rating:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            payload = await request.json()
+            parsed_user_id = parsed_user_id or payload.get("user_id")
+            parsed_rating = parsed_rating or payload.get("rating")
+    if not parsed_user_id or not parsed_rating:
+        return JSONResponse({"error": "Missing user_id or rating"}, status_code=422)
+
+    key = (idempotency_key or "").strip() or (
+        f"{parsed_user_id}:{exam_id}:{card_id}:{parsed_rating}:{datetime.now(timezone.utc).isoformat()}"
+    )
+    service = ReviewService()
     try:
-        result = reducer.apply_review(
-            user_id=user_id,
+        result = service.apply_review(
+            user_id=parsed_user_id,
             exam_id=exam_id,
             card_id=card_id,
-            rating=rating,
+            rating=parsed_rating,
             idempotency_key=key,
         )
     except ValueError as exc:
@@ -135,13 +367,57 @@ async def review_card_endpoint(
             status = 403
         return JSONResponse({"error": message}, status_code=status)
 
-    return {
+    # Keep backward-compatible fields while exposing schema fields.
+    response = {
         "review_id": result.review_id,
         "card_id": result.card_id,
         "rating": result.rating,
+        "due_at": result.due_at,
+        "interval_days": result.interval_days,
+        "ease": result.ease,
         "topic_proficiency": result.topic_proficiency,
         "diagnostic_answered": result.diagnostic_answered,
         "diagnostic_total": result.diagnostic_total,
         "exam_state": result.exam_state,
         "idempotent_replay": result.idempotent_replay,
     }
+    return response
+
+
+@app.post("/exams/{exam_id}/session/event", response_model=SessionEventResponse)
+async def session_event_endpoint(exam_id: str, req: SessionEventRequest):
+    store = VectorStore()
+    event_id = store.db.add_event(
+        user_id=req.user_id,
+        exam_id=exam_id,
+        type=req.event_type,
+        payload=req.payload or {},
+    )
+    return SessionEventResponse(event_id=event_id)
+
+
+@app.get("/exams/{exam_id}/progress", response_model=TopicProgressResponse)
+async def topic_progress_endpoint(exam_id: str, user_id: str = Query(...)):
+    store = VectorStore()
+    topics = {t.topic_id: t for t in store.db.list_topics(exam_id=exam_id)}
+    prof_rows = store.db.list_topic_proficiencies(user_id=user_id, exam_id=exam_id)
+    payload: List[TopicProficiencyResponse] = []
+    for p in prof_rows:
+        payload.append(
+            TopicProficiencyResponse(
+                topic_id=p.topic_id,
+                topic_label=topics.get(p.topic_id).label if topics.get(p.topic_id) else p.topic_id,
+                proficiency=float(p.proficiency),
+                last_updated_at=p.last_updated_at,
+                n_reviews=int(p.seen_count),
+            )
+        )
+    overall = (sum(x.proficiency for x in payload) / len(payload)) if payload else None
+    return TopicProgressResponse(
+        exam_id=exam_id,
+        user_id=user_id,
+        topics=payload,
+        overall_proficiency=overall,
+    )
+
+

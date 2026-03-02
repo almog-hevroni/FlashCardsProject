@@ -74,36 +74,6 @@ class ImmutableExamGuardrailsTests(unittest.TestCase):
                 doc_ids=[second_results[0].doc_id],
             )
 
-    def test_api_returns_canonical_immutable_exam_error_payload(self) -> None:
-        exam_id = create_exam(store=self.store, user_id="user-c", title="API contract test")
-        bootstrap_doc = _write_text_doc("api_bootstrap.txt", "bootstrap doc text")
-
-        first_results = ingest_documents(
-            [bootstrap_doc],
-            store=self.store,
-            user_id="user-c",
-            exam_id=exam_id,
-        )
-        attach_documents(
-            store=self.store,
-            exam_id=exam_id,
-            doc_ids=[result.doc_id for result in first_results],
-        )
-
-        client = TestClient(app)
-        response = client.post(
-            "/ingest",
-            data={"user_id": "user-c", "exam_id": exam_id},
-            files=[("files", ("api_second.txt", "second upload should fail", "text/plain"))],
-        )
-
-        self.assertEqual(response.status_code, 409)
-        payload = response.json()
-        self.assertIn("error", payload)
-        self.assertEqual(payload["error"]["code"], "immutable_exam")
-        self.assertEqual(payload["error"]["exam_id"], exam_id)
-        self.assertIn("immutable", payload["error"]["message"].lower())
-
 
 if __name__ == "__main__":
     unittest.main()

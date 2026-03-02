@@ -137,6 +137,51 @@ class RepositoryAndReducerTests(unittest.TestCase):
         self.assertIsNotNone(prev)
         self.assertEqual(prev.sequence_no, 1)
 
+    def test_due_cards_are_user_scoped(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repo.upsert_card_scheduling(
+            card_id="c1",
+            due_at=now - timedelta(minutes=5),
+            state="review",
+            interval_days=1.0,
+            ease=2.5,
+            reps=1,
+            lapses=0,
+            last_reviewed_at=now - timedelta(days=1),
+        )
+
+        other_user = "phase2-user-other"
+        self.repo.ensure_user(other_user)
+        other_exam = self.repo.create_exam(user_id=other_user, title="Other exam")
+        self.repo.upsert_topic(topic_id="other-t1", exam_id=other_exam, label="Other Topic")
+        self.repo.upsert_card(
+            card_id="other-c1",
+            exam_id=other_exam,
+            topic_id="other-t1",
+            question="Other Q?",
+            answer="Other A",
+            difficulty=1,
+            status="active",
+            info={},
+        )
+        self.repo.upsert_card_scheduling(
+            card_id="other-c1",
+            due_at=now - timedelta(minutes=5),
+            state="review",
+            interval_days=1.0,
+            ease=2.5,
+            reps=1,
+            lapses=0,
+            last_reviewed_at=now - timedelta(days=1),
+        )
+
+        due_self = self.repo.list_due_cards(
+            user_id="phase2-user",
+            exam_id=self.exam_id,
+            at_or_before=now,
+        )
+        self.assertEqual([x.card_id for x in due_self], ["c1"])
+
     def test_scheduling_transition_matrix(self) -> None:
         service = CardSchedulingStateService()
         now = datetime.now(timezone.utc)

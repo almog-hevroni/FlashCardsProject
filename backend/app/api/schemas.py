@@ -102,7 +102,7 @@ class BuildTopicsResponse(BaseModel):
 class TopicListResponse(BaseModel):
     """Response for listing topics."""
     exam_id: str
-    topics: List[TopicWithEvidenceResponse]
+    topics: List[TopicResponse]
 
 
 # =============================================================================
