@@ -145,6 +145,15 @@ class StoredTopicProficiency:
 
 
 @dataclass
+class StoredStudentKnowledgeState:
+    user_id: str
+    exam_id: str
+    topic_id: str
+    memory: Dict[str, Any]
+    updated_at: str
+
+
+@dataclass
 class StoredExamSessionState:
     user_id: str
     exam_id: str
@@ -1534,6 +1543,143 @@ class DBRepository:
             ]
 
     # =========================================================================
+    # STUDENT KNOWLEDGE STATE METHODS
+    # =========================================================================
+
+    def get_student_knowledge_state(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        topic_id: str,
+        session: Optional[Session] = None,
+    ) -> Optional[StoredStudentKnowledgeState]:
+        """Get student memory state for a user/exam/topic."""
+        if session is not None:
+            row = (
+                session.query(StudentKnowledgeState)
+                .filter(
+                    StudentKnowledgeState.user_id == user_id,
+                    StudentKnowledgeState.exam_id == exam_id,
+                    StudentKnowledgeState.topic_id == topic_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredStudentKnowledgeState(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                topic_id=row.topic_id,
+                memory=row.memory or {},
+                updated_at=_datetime_to_str(row.updated_at),
+            )
+
+        with get_db() as db:
+            row = (
+                db.query(StudentKnowledgeState)
+                .filter(
+                    StudentKnowledgeState.user_id == user_id,
+                    StudentKnowledgeState.exam_id == exam_id,
+                    StudentKnowledgeState.topic_id == topic_id,
+                )
+                .first()
+            )
+            if not row:
+                return None
+            return StoredStudentKnowledgeState(
+                user_id=row.user_id,
+                exam_id=row.exam_id,
+                topic_id=row.topic_id,
+                memory=row.memory or {},
+                updated_at=_datetime_to_str(row.updated_at),
+            )
+
+    def upsert_student_knowledge_state(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        topic_id: str,
+        memory: Optional[Dict[str, Any]] = None,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Insert/update student memory state for a user/exam/topic."""
+        payload = dict(memory or {})
+        if session is not None:
+            row = (
+                session.query(StudentKnowledgeState)
+                .filter(
+                    StudentKnowledgeState.user_id == user_id,
+                    StudentKnowledgeState.exam_id == exam_id,
+                    StudentKnowledgeState.topic_id == topic_id,
+                )
+                .first()
+            )
+            if row:
+                row.memory = payload
+            else:
+                session.add(
+                    StudentKnowledgeState(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        topic_id=topic_id,
+                        memory=payload,
+                    )
+                )
+            return
+
+        with get_db() as db:
+            row = (
+                db.query(StudentKnowledgeState)
+                .filter(
+                    StudentKnowledgeState.user_id == user_id,
+                    StudentKnowledgeState.exam_id == exam_id,
+                    StudentKnowledgeState.topic_id == topic_id,
+                )
+                .first()
+            )
+            if row:
+                row.memory = payload
+            else:
+                db.add(
+                    StudentKnowledgeState(
+                        user_id=user_id,
+                        exam_id=exam_id,
+                        topic_id=topic_id,
+                        memory=payload,
+                    )
+                )
+
+    def list_student_knowledge_states(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+    ) -> List[StoredStudentKnowledgeState]:
+        """List student memory states for all topics in a user/exam."""
+        with get_db() as db:
+            rows = (
+                db.query(StudentKnowledgeState)
+                .filter(
+                    StudentKnowledgeState.user_id == user_id,
+                    StudentKnowledgeState.exam_id == exam_id,
+                )
+                .order_by(StudentKnowledgeState.topic_id.asc())
+                .all()
+            )
+            return [
+                StoredStudentKnowledgeState(
+                    user_id=r.user_id,
+                    exam_id=r.exam_id,
+                    topic_id=r.topic_id,
+                    memory=r.memory or {},
+                    updated_at=_datetime_to_str(r.updated_at),
+                )
+                for r in rows
+            ]
+
+    # =========================================================================
     # SESSION STATE + PRESENTATION LOG METHODS
     # =========================================================================
 
@@ -1901,7 +2047,7 @@ class DBRepository:
         difficulty: Optional[int],
         embedding: np.ndarray,
     ) -> None:
-        """Insert a question_index row (question must exist before answering begins)."""
+        """Insert or update a question_index row for a successfully created card question."""
         arr = embedding.astype("float32", copy=False).reshape(-1)
         with get_db() as db:
             existing = db.query(QuestionIndexEntry).filter(

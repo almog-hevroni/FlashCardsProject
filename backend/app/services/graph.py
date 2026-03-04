@@ -7,29 +7,30 @@ Topic-scoped, difficulty-aware card generation with:
 - Robust retry logic (full restart on persistent failures)
 """
 
-from typing import Any, Dict, List, Optional, Sequence, TypedDict
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import time
 import uuid
 import numpy as np
 from langgraph.graph import StateGraph, END
 
 from app.data.vector_store import VectorStore
 from app.data.pinecone_backend import PineconeClient, pinecone_namespace
+from app.services.student_memory import StudentMemoryService
+from app.services.student_model import StudentModelService
+from app.services.teacher_model import TeacherModelService
 from app.services.llm import (
     chat_completions_create,
     CHAT_MODEL,
-    CHAT_MODEL_FAST,
     embed_texts,
 )
-from app.services.qa import generate_answer
 from app.services.cards import (
     GeneratedCard,
-    generate_question_at_difficulty,
     pick_starter_topics,
-    DIFFICULTY_LEVELS,
 )
 from app.services.context_packs import build_diverse_chunk_pack
 from app.api.schemas import ProofSpan
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # ------------- Configuration -------------
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: Dict[str, Any] = {
     "max_question_attempts": 3,
     "max_answer_attempts": 3,
     "max_full_restarts": 5,
@@ -48,7 +49,19 @@ DEFAULT_CONFIG = {
     "initial_min_score": 0.4,
     "strengthen_k_delta": 2,
     "strengthen_min_score_delta": 0.05,
+    "commit_retry_attempts": 3,
+    "commit_retry_sleep_s": 0.25,
 }
+
+
+@dataclass(frozen=True)
+class BatchSeenQuestion:
+    question_id: str
+    topic_id: str
+    question_text: str
+    difficulty: int
+    embedding: np.ndarray
+    created_seq: int
 
 # ------------- Helpers (kept from old implementation) -------------
 
@@ -73,6 +86,15 @@ def _embed_with_store_cache(texts: List[str], store: VectorStore) -> np.ndarray:
         store.add_cached_embeddings({hashes[idx]: cached[hashes[idx]] for idx in missing_idx})
     vectors = np.stack([cached[h] for h in hashes]).astype("float32", copy=False)
     return vectors
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    va = a.astype("float32", copy=False).reshape(-1)
+    vb = b.astype("float32", copy=False).reshape(-1)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    if denom <= 1e-12:
+        return 0.0
+    return float(np.dot(va, vb) / denom)
 
 
 def _validate_answer(question: str, answer: str, proofs: List[ProofSpan]) -> Dict[str, Any]:
@@ -134,6 +156,7 @@ class CardGenState(TypedDict):
     exam_id: str
     user_id: str
     store_basepath: str
+    batch_id: str
     
     # Current topic
     topic_id: str
@@ -142,6 +165,8 @@ class CardGenState(TypedDict):
     card_type: str
     allowed_chunk_ids: List[str]
     context_pack: str
+    batch_seen_questions: Tuple[BatchSeenQuestion, ...]
+    student_memory: Dict[str, Any]
     
     # Question state
     question: Optional[str]
@@ -164,8 +189,16 @@ class CardGenState(TypedDict):
     max_question_attempts: int
     max_answer_attempts: int
     max_full_restarts: int
+    uniqueness_threshold: float
+    validation_threshold: float
+    commit_retry_attempts: int
+    commit_retry_sleep_s: float
     
     # Retrieval params (for strengthening)
+    initial_k: int
+    initial_min_score: float
+    strengthen_k_delta: int
+    strengthen_min_score_delta: float
     k: int
     min_score: float
     
@@ -181,10 +214,11 @@ class CardGenState(TypedDict):
 
 def node_generate_question(state: CardGenState) -> CardGenState:
     """Generate a question at the specified difficulty level."""
-    question = generate_question_at_difficulty(
+    question = StudentModelService().generate_question(
         topic_label=state["topic_label"],
         context_pack=state["context_pack"],
         difficulty=state["difficulty"],
+        memory=state.get("student_memory") or {},
     )
     return {
         **state,
@@ -210,75 +244,107 @@ def node_check_uniqueness(state: CardGenState) -> CardGenState:
     Check if question is semantically unique within this exam.
     Uses Pinecone question index search for similarity lookup (topic-scoped).
     """
-    store = VectorStore(basepath=state["store_basepath"])
-    if store.vector_backend == "pinecone":
-        ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
-        store.set_namespace(ns)
-        pc = PineconeClient()
-        query_vec = state["question_embedding"]
-        # Topic-scoped dedupe (filter by topic_id), embedding-only
-        matches = pc.query(
-            index=pc.questions,
-            namespace=ns,
-            query_vec=query_vec,
-            top_k=20,
-            filter={"topic_id": state["topic_id"]},
-        )
-        threshold = DEFAULT_CONFIG["uniqueness_threshold"]
-        for _qid, sim in matches:
-            if sim >= threshold:
-                return {**state, "is_unique": False}
-        return {**state, "is_unique": True}
+    threshold = float(state["uniqueness_threshold"])
+    query_vec = state["question_embedding"]
+    if query_vec is None:
+        return {**state, "is_unique": False}
 
-    # Fallback: if not Pinecone, keep old behavior (treat as unique).
+    # In-batch visibility check (deterministic sequential snapshot).
+    for seen in state.get("batch_seen_questions", ()):
+        if seen.topic_id != state["topic_id"]:
+            continue
+        sim = _cosine_similarity(query_vec, seen.embedding)
+        if sim >= threshold:
+            return {**state, "is_unique": False}
+
+    store = VectorStore(basepath=state["store_basepath"])
+    if store.vector_backend != "pinecone":
+        # Phase 5 contract: uniqueness gate is mandatory.
+        raise RuntimeError(
+            "Mandatory uniqueness gate requires VECTOR_BACKEND=pinecone for card generation."
+        )
+
+    ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
+    store.set_namespace(ns)
+    pc = PineconeClient()
+    matches = pc.query(
+        index=pc.questions,
+        namespace=ns,
+        query_vec=query_vec,
+        top_k=20,
+        filter={"topic_id": state["topic_id"]},
+    )
+    for _qid, sim in matches:
+        if sim >= threshold:
+            return {**state, "is_unique": False}
     return {**state, "is_unique": True}
 
 
-def node_store_embedding(state: CardGenState) -> CardGenState:
+def node_save_question_id(state: CardGenState) -> CardGenState:
     """
-    Store the question in SQL question_index and upsert embedding to Pinecone questions index.
-    Must happen before answering begins (even if answer fails later).
+    Reservation-only step: assign a stable question_id.
+    Permanent SQL/Pinecone commit happens only after validated card storage.
     """
+    question_id = state.get("question_id") or uuid.uuid4().hex[:16]
+    return {**state, "question_id": question_id}
+
+
+def node_commit_question_index(state: CardGenState) -> CardGenState:
+    """Persist question embedding/metadata after successful card generation."""
+    question_id = state.get("question_id")
+    embedding = state.get("question_embedding")
+    if not question_id or embedding is None:
+        raise RuntimeError("Cannot commit question index without question_id and embedding.")
+
     store = VectorStore(basepath=state["store_basepath"])
-    question_id = uuid.uuid4().hex[:16]
+    store.db.add_question_index_entry(
+        question_id=question_id,
+        exam_id=state["exam_id"],
+        topic_id=state["topic_id"],
+        question_text=state["question"] or "",
+        difficulty=int(state["difficulty"]) if state.get("difficulty") is not None else None,
+        embedding=embedding,
+    )
 
-    if store.vector_backend == "pinecone":
-        ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
-        store.set_namespace(ns)
-        # SQL audit/source-of-truth
-        store.db.add_question_index_entry(
-            question_id=question_id,
-            exam_id=state["exam_id"],
-            topic_id=state["topic_id"],
-            question_text=state["question"] or "",
-            difficulty=int(state["difficulty"]) if state.get("difficulty") is not None else None,
-            embedding=state["question_embedding"],
-        )
-        # Pinecone similarity index
-        pc = PineconeClient()
-        pc.upsert(
-            index=pc.questions,
-            namespace=ns,
-            vectors=[(question_id, state["question_embedding"])],
-            metadata_by_id={
-                question_id: {
-                    "topic_id": state["topic_id"],
-                    "difficulty": int(state["difficulty"]),
-                }
-            },
-            batch_size=100,
-        )
-    else:
-        # Non-Pinecone path: still record SQL row for consistency
-        store.db.add_question_index_entry(
-            question_id=question_id,
-            exam_id=state["exam_id"],
-            topic_id=state["topic_id"],
-            question_text=state["question"] or "",
-            difficulty=int(state["difficulty"]) if state.get("difficulty") is not None else None,
-            embedding=state["question_embedding"],
-        )
+    if store.vector_backend != "pinecone":
+        raise RuntimeError("Question index commit requires VECTOR_BACKEND=pinecone.")
 
+    ns = pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"])
+    store.set_namespace(ns)
+    pc = PineconeClient()
+    max_retries = max(1, int(state["commit_retry_attempts"]))
+    sleep_s = float(state["commit_retry_sleep_s"])
+    for attempt in range(1, max_retries + 1):
+        try:
+            pc.upsert(
+                index=pc.questions,
+                namespace=ns,
+                vectors=[(question_id, embedding)],
+                metadata_by_id={
+                    question_id: {
+                        "topic_id": state["topic_id"],
+                        "difficulty": int(state["difficulty"]),
+                    }
+                },
+                batch_size=100,
+            )
+            break
+        except Exception:
+            if attempt >= max_retries:
+                raise
+            time.sleep(sleep_s * attempt)
+
+    store.db.add_event(
+        user_id=state["user_id"],
+        exam_id=state["exam_id"],
+        type="question_index_committed",
+        payload={
+            "question_id": question_id,
+            "topic_id": state["topic_id"],
+            "difficulty": state["difficulty"],
+            "batch_id": state.get("batch_id"),
+        },
+    )
     return {**state, "question_id": question_id}
 
 
@@ -288,7 +354,7 @@ def node_generate_answer(state: CardGenState) -> CardGenState:
     if store.vector_backend == "pinecone":
         store.set_namespace(pinecone_namespace(user_id=state["user_id"], exam_id=state["exam_id"]))
     
-    result = generate_answer(
+    result = TeacherModelService().generate_answer(
         question=state["question"],
         k=state["k"],
         min_score=state["min_score"],
@@ -322,8 +388,8 @@ def node_strengthen(state: CardGenState) -> CardGenState:
     """Strengthen retrieval parameters for retry."""
     return {
         **state,
-        "k": state["k"] + DEFAULT_CONFIG["strengthen_k_delta"],
-        "min_score": max(0.2, state["min_score"] - DEFAULT_CONFIG["strengthen_min_score_delta"]),
+        "k": state["k"] + state["strengthen_k_delta"],
+        "min_score": max(0.2, state["min_score"] - state["strengthen_min_score_delta"]),
     }
 
 
@@ -398,8 +464,8 @@ def node_full_restart(state: CardGenState) -> CardGenState:
         "question_attempts": 0,
         "answer_attempts": 0,
         "full_restart_count": state["full_restart_count"] + 1,
-        "k": DEFAULT_CONFIG["initial_k"],
-        "min_score": DEFAULT_CONFIG["initial_min_score"],
+        "k": state["initial_k"],
+        "min_score": state["initial_min_score"],
     }
 
 
@@ -409,7 +475,7 @@ def node_full_restart(state: CardGenState) -> CardGenState:
 def decide_after_uniqueness(state: CardGenState) -> str:
     """Decide next step after uniqueness check."""
     if state["is_unique"]:
-        return "store_embedding"
+        return "save_question_id"
     
     if state["question_attempts"] < state["max_question_attempts"]:
         return "regenerate_question"
@@ -424,7 +490,7 @@ def decide_after_uniqueness(state: CardGenState) -> str:
 
 def decide_after_validation(state: CardGenState) -> str:
     """Decide next step after answer validation."""
-    threshold = DEFAULT_CONFIG["validation_threshold"]
+    threshold = state["validation_threshold"]
     
     if state["validation_score"] >= threshold:
         return "store_card"
@@ -447,7 +513,7 @@ def decide_after_restart(state: CardGenState) -> str:
     return "end"
 
 
-def decide_after_store_embedding(state: CardGenState) -> str:
+def decide_after_save_question_id(state: CardGenState) -> str:
     """Decide whether to continue to answering or stop (for parallel starter pack)."""
     if state.get("stop_after_embedding", False):
         return "end"
@@ -465,11 +531,12 @@ def build_card_graph():
     g.add_node("generate_question", node_generate_question)
     g.add_node("embed_question", node_embed_question)
     g.add_node("check_uniqueness", node_check_uniqueness)
-    g.add_node("store_embedding", node_store_embedding)
+    g.add_node("save_question_id", node_save_question_id)
     g.add_node("generate_answer", node_generate_answer)
     g.add_node("validate", node_validate)
     g.add_node("strengthen", node_strengthen)
     g.add_node("store_card", node_store_card)
+    g.add_node("commit_question_index", node_commit_question_index)
     g.add_node("full_restart", node_full_restart)
     
     # Set entry point
@@ -480,12 +547,13 @@ def build_card_graph():
     g.add_edge("embed_question", "check_uniqueness")
     g.add_edge("generate_answer", "validate")
     g.add_edge("strengthen", "generate_answer")
-    g.add_edge("store_card", END)
+    g.add_edge("store_card", "commit_question_index")
+    g.add_edge("commit_question_index", END)
     
-    # Conditional edge after store_embedding (for parallel starter pack)
+    # Conditional edge after save_question_id (for parallel starter pack)
     g.add_conditional_edges(
-        "store_embedding",
-        decide_after_store_embedding,
+        "save_question_id",
+        decide_after_save_question_id,
         {
             "generate_answer": "generate_answer",
             "end": END,
@@ -497,7 +565,7 @@ def build_card_graph():
         "check_uniqueness",
         decide_after_uniqueness,
         {
-            "store_embedding": "store_embedding",
+            "save_question_id": "save_question_id",
             "regenerate_question": "generate_question",
             "full_restart": "full_restart",
             "end": END,
@@ -535,6 +603,7 @@ def build_card_graph():
 def _run_question_phase(
     *,
     exam_id: str,
+    batch_id: str,
     topic_id: str,
     topic_label: str,
     allowed_chunk_ids: List[str],
@@ -543,22 +612,31 @@ def _run_question_phase(
     card_type: str,
     user_id: str,
     store: VectorStore,
+    batch_seen_questions: Tuple[BatchSeenQuestion, ...],
 ) -> Optional[CardGenState]:
     """
     Phase 1: Generate and dedupe a unique question.
     
     Returns the state with question + embedding stored, or None if failed.
     """
+    student_memory = StudentMemoryService(repo=store.db).get_topic_memory(
+        user_id=user_id,
+        exam_id=exam_id,
+        topic_id=topic_id,
+    )
     initial_state: CardGenState = {
         "exam_id": exam_id,
         "user_id": user_id,
         "store_basepath": str(store.base),
+        "batch_id": batch_id,
         "topic_id": topic_id,
         "topic_label": topic_label,
         "difficulty": difficulty,
         "card_type": card_type,
         "allowed_chunk_ids": allowed_chunk_ids,
         "context_pack": context_pack,
+        "batch_seen_questions": batch_seen_questions,
+        "student_memory": student_memory,
         "question": None,
         "question_embedding": None,
         "question_id": None,
@@ -573,6 +651,14 @@ def _run_question_phase(
         "max_question_attempts": DEFAULT_CONFIG["max_question_attempts"],
         "max_answer_attempts": DEFAULT_CONFIG["max_answer_attempts"],
         "max_full_restarts": DEFAULT_CONFIG["max_full_restarts"],
+        "uniqueness_threshold": DEFAULT_CONFIG["uniqueness_threshold"],
+        "validation_threshold": DEFAULT_CONFIG["validation_threshold"],
+        "commit_retry_attempts": DEFAULT_CONFIG["commit_retry_attempts"],
+        "commit_retry_sleep_s": DEFAULT_CONFIG["commit_retry_sleep_s"],
+        "initial_k": DEFAULT_CONFIG["initial_k"],
+        "initial_min_score": DEFAULT_CONFIG["initial_min_score"],
+        "strengthen_k_delta": DEFAULT_CONFIG["strengthen_k_delta"],
+        "strengthen_min_score_delta": DEFAULT_CONFIG["strengthen_min_score_delta"],
         "k": DEFAULT_CONFIG["initial_k"],
         "min_score": DEFAULT_CONFIG["initial_min_score"],
         "stop_after_embedding": True,
@@ -601,7 +687,7 @@ def _run_answer_phase(state: CardGenState) -> Optional[GeneratedCard]:
     max_answer_attempts = state["max_answer_attempts"]
     max_full_restarts = state["max_full_restarts"]
     
-    for restart in range(max_full_restarts):
+    for _ in range(max_full_restarts):
         for attempt in range(max_answer_attempts):
             # Generate answer
             state = node_generate_answer(state)
@@ -610,9 +696,10 @@ def _run_answer_phase(state: CardGenState) -> Optional[GeneratedCard]:
             state = node_validate(state)
             
             # Check validation
-            if state["validation_score"] >= DEFAULT_CONFIG["validation_threshold"]:
+            if state["validation_score"] >= state["validation_threshold"]:
                 # Success! Store the card
                 state = node_store_card(state)
+                state = node_commit_question_index(state)
                 return state.get("card")
             
             # Failed validation - strengthen and retry
@@ -661,17 +748,25 @@ def generate_single_card(
     store = store or VectorStore()
     if store.vector_backend == "pinecone":
         store.set_namespace(pinecone_namespace(user_id=user_id, exam_id=exam_id))
+    student_memory = StudentMemoryService(repo=store.db).get_topic_memory(
+        user_id=user_id,
+        exam_id=exam_id,
+        topic_id=topic_id,
+    )
     
     initial_state: CardGenState = {
         "exam_id": exam_id,
         "user_id": user_id,
         "store_basepath": str(store.base),
+        "batch_id": uuid.uuid4().hex[:12],
         "topic_id": topic_id,
         "topic_label": topic_label,
         "difficulty": difficulty,
         "card_type": card_type,
         "allowed_chunk_ids": allowed_chunk_ids,
         "context_pack": context_pack,
+        "batch_seen_questions": tuple(),
+        "student_memory": student_memory,
         "question": None,
         "question_embedding": None,
         "question_id": None,
@@ -686,6 +781,14 @@ def generate_single_card(
         "max_question_attempts": DEFAULT_CONFIG["max_question_attempts"],
         "max_answer_attempts": DEFAULT_CONFIG["max_answer_attempts"],
         "max_full_restarts": DEFAULT_CONFIG["max_full_restarts"],
+        "uniqueness_threshold": DEFAULT_CONFIG["uniqueness_threshold"],
+        "validation_threshold": DEFAULT_CONFIG["validation_threshold"],
+        "commit_retry_attempts": DEFAULT_CONFIG["commit_retry_attempts"],
+        "commit_retry_sleep_s": DEFAULT_CONFIG["commit_retry_sleep_s"],
+        "initial_k": DEFAULT_CONFIG["initial_k"],
+        "initial_min_score": DEFAULT_CONFIG["initial_min_score"],
+        "strengthen_k_delta": DEFAULT_CONFIG["strengthen_k_delta"],
+        "strengthen_min_score_delta": DEFAULT_CONFIG["strengthen_min_score_delta"],
         "k": DEFAULT_CONFIG["initial_k"],
         "min_score": DEFAULT_CONFIG["initial_min_score"],
         "stop_after_embedding": stop_after_embedding,
@@ -756,6 +859,9 @@ def generate_starter_cards_v2(
     # ═══════════════════════════════════════════════════════════════════════
     
     question_states: List[CardGenState] = []
+    batch_id = uuid.uuid4().hex[:12]
+    batch_seen_master: List[BatchSeenQuestion] = []
+    next_created_seq = 1
     
     for topic_id, ctx in topic_contexts.items():
         if len(question_states) >= n:
@@ -763,6 +869,7 @@ def generate_starter_cards_v2(
         
         state = _run_question_phase(
             exam_id=exam_id,
+            batch_id=batch_id,
             topic_id=topic_id,
             topic_label=ctx["topic_label"],
             allowed_chunk_ids=ctx["allowed_chunk_ids"],
@@ -771,10 +878,25 @@ def generate_starter_cards_v2(
             card_type=card_type,
             user_id=user_id,
             store=store,
+            batch_seen_questions=tuple(batch_seen_master),
         )
         
         if state:
             question_states.append(state)
+            emb = state.get("question_embedding")
+            qid = state.get("question_id")
+            if emb is not None and qid:
+                batch_seen_master.append(
+                    BatchSeenQuestion(
+                        question_id=qid,
+                        topic_id=state["topic_id"],
+                        question_text=state["question"] or "",
+                        difficulty=int(state["difficulty"]),
+                        embedding=emb,
+                        created_seq=next_created_seq,
+                    )
+                )
+                next_created_seq += 1
             logger.info(
                 "Phase 1: Generated unique question for topic '%s': %s",
                 ctx["topic_label"], state["question"][:50]

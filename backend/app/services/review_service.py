@@ -7,6 +7,7 @@ from typing import Optional
 from app.data.db_repository import DBRepository
 from app.services.diagnostic_review_reducer import DiagnosticReviewReducer
 from app.services.review_state_reducer import ReviewStateReducer
+from app.services.student_memory import StudentMemoryService
 
 
 @dataclass
@@ -35,10 +36,40 @@ class ReviewService:
         repo: Optional[DBRepository] = None,
         diagnostic_reducer: Optional[DiagnosticReviewReducer] = None,
         active_reducer: Optional[ReviewStateReducer] = None,
+        student_memory: Optional[StudentMemoryService] = None,
     ) -> None:
         self.repo = repo or DBRepository(Path("store/meta.sqlite"))
         self.diagnostic_reducer = diagnostic_reducer or DiagnosticReviewReducer(repo=self.repo)
         self.active_reducer = active_reducer or ReviewStateReducer(repo=self.repo)
+        self.student_memory = student_memory or StudentMemoryService(repo=self.repo)
+
+    def _apply_student_memory_update(
+        self,
+        *,
+        user_id: str,
+        exam_id: str,
+        card_id: str,
+        rating: str,
+    ) -> None:
+        card = self.repo.get_card(card_id=card_id)
+        if card is None:
+            return
+        links = self.repo.list_card_topics(card_id=card_id)
+        if links:
+            primary_links = [x for x in links if x.role == "primary"]
+            topic_id = primary_links[0].topic_id if primary_links else links[0].topic_id
+        else:
+            topic_id = card.topic_id
+        self.student_memory.update_from_review(
+            user_id=user_id,
+            exam_id=exam_id,
+            topic_id=topic_id,
+            rating=rating,
+            question=card.question,
+            answer=card.answer,
+            difficulty=card.difficulty,
+            source="review_service",
+        )
 
     def apply_review(
         self,
@@ -63,6 +94,13 @@ class ReviewService:
                 rating=rating,
                 idempotency_key=idempotency_key,
             )
+            if not d.idempotent_replay:
+                self._apply_student_memory_update(
+                    user_id=user_id,
+                    exam_id=exam_id,
+                    card_id=card_id,
+                    rating=rating,
+                )
             return ReviewServiceResult(
                 review_id=d.review_id,
                 card_id=d.card_id,
@@ -81,6 +119,13 @@ class ReviewService:
             rating=rating,
             idempotency_key=idempotency_key,
         )
+        if not a.idempotent_replay:
+            self._apply_student_memory_update(
+                user_id=user_id,
+                exam_id=exam_id,
+                card_id=card_id,
+                rating=rating,
+            )
         return ReviewServiceResult(
             review_id=a.review_id,
             card_id=a.card_id,

@@ -23,7 +23,7 @@ def _write_text_doc(name: str, body: str) -> str:
     return str(path)
 
 
-class Phase3DiagnosticLifecycleTests(unittest.TestCase):
+class DiagnosticLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         drop_all_tables()
         init_db()
