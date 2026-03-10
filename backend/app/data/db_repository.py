@@ -72,17 +72,6 @@ class StoredTopic:
 
 
 @dataclass
-class StoredTopicEvidence:
-    evidence_id: str
-    topic_id: str
-    doc_id: str
-    page: Optional[int]
-    start: int
-    end: int
-    text: str
-
-
-@dataclass
 class StoredCard:
     card_id: str
     exam_id: str
@@ -640,6 +629,9 @@ class DBRepository:
                 for row in db.query(Topic).filter(Topic.exam_id == exam_id).all()
             ]
             if topic_ids:
+                db.query(QuestionIndexEntry).filter(
+                    QuestionIndexEntry.topic_id.in_(topic_ids)
+                ).delete(synchronize_session=False)
                 db.query(TopicEvidence).filter(TopicEvidence.topic_id.in_(topic_ids)).delete(
                     synchronize_session=False
                 )
@@ -816,28 +808,6 @@ class DBRepository:
                     end=int(ev.get("end") or 0),
                     text=str(ev.get("text") or ""),
                 ))
-
-    def list_topic_evidence(self, *, topic_id: str) -> List[StoredTopicEvidence]:
-        """List evidence spans for a topic."""
-        with get_db() as db:
-            rows = (
-                db.query(TopicEvidence)
-                .filter(TopicEvidence.topic_id == topic_id)
-                .order_by(TopicEvidence.doc_id.asc(), TopicEvidence.page.asc(), TopicEvidence.start.asc())
-                .all()
-            )
-            return [
-                StoredTopicEvidence(
-                    evidence_id=r.evidence_id,
-                    topic_id=r.topic_id,
-                    doc_id=r.doc_id,
-                    page=r.page,
-                    start=int(r.start or 0),
-                    end=int(r.end or 0),
-                    text=r.text or "",
-                )
-                for r in rows
-            ]
     
     # =========================================================================
     # TOPIC VECTOR METHODS
@@ -1096,6 +1066,9 @@ class DBRepository:
                         weight=t["weight"],
                     )
                 )
+            # SessionLocal uses autoflush=False; flush so immediate follow-up reads
+            # in the same transaction can see the newly inserted topic links.
+            db.flush()
             return
 
         with get_db() as db:

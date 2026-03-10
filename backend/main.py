@@ -1,6 +1,31 @@
-import argparse, json, logging, time, sys
+import argparse, json, logging, mimetypes, time, sys
+from pathlib import Path
+from typing import Any, Dict, Optional
+import re
+
+import httpx
 from dotenv import load_dotenv
 load_dotenv()
+
+_ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
+
+class TeeTextOutput:
+    """Write console output to terminal and plain-text file."""
+    def __init__(self, console_stream, file_stream):
+        self.console_stream = console_stream
+        self.file_stream = file_stream
+
+    def write(self, text: str):
+        self.console_stream.write(text)
+        self.file_stream.write(_ANSI_RE.sub("", text))
+        return len(text)
+
+    def flush(self):
+        self.console_stream.flush()
+        self.file_stream.flush()
+
+    def isatty(self):
+        return self.console_stream.isatty()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PRESENTATION UTILITIES - Beautiful Terminal Output
@@ -160,6 +185,140 @@ def print_topics_box(topics):
         print(f"{Colors.CYAN}  │{Colors.RESET}  • {label:<64}{Colors.CYAN}│{Colors.RESET}")
     print(f"{Colors.CYAN}  └─────────────────────────────────────────────────────────────────────┘{Colors.RESET}")
 
+def print_endpoint_result(method: str, endpoint: str, status_code: int, payload: Any):
+    """Print endpoint response with consistent formatting."""
+    status_color = Colors.GREEN if 200 <= status_code < 300 else Colors.RED
+    print(f"\n{Colors.BOLD}{method} {endpoint}{Colors.RESET} -> {status_color}{status_code}{Colors.RESET}")
+    try:
+        pretty = json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception:
+        pretty = str(payload)
+    print(pretty)
+
+def _require_ok(resp: httpx.Response, method: str, endpoint: str) -> Dict[str, Any]:
+    """Parse JSON and fail fast if request is not successful."""
+    try:
+        payload: Any = resp.json()
+    except Exception:
+        payload = {"raw": resp.text}
+    print_endpoint_result(method, endpoint, resp.status_code, payload)
+    if resp.status_code >= 400:
+        raise SystemExit(f"API call failed: {method} {endpoint} -> HTTP {resp.status_code}")
+    if isinstance(payload, dict):
+        return payload
+    return {"data": payload}
+
+def run_api_smoke(args):
+    """Run end-to-end API checks through HTTP endpoints."""
+    start_time = time.time()
+    if not args.api_files:
+        raise SystemExit("--api_smoke requires --api_files with one or more document paths")
+    for path in args.api_files:
+        if not Path(path).exists():
+            raise SystemExit(f"File not found: {path}")
+
+    base_url = args.api_base_url.rstrip("/")
+    timeout = httpx.Timeout(args.api_timeout)
+    print("=== API CLI Smoke Test ===")
+    print(f"API base URL: {base_url}")
+    print(f"User ID: {args.user_id}")
+    print("Running endpoint checks in sequence...")
+
+    with httpx.Client(base_url=base_url, timeout=timeout) as client:
+        multipart_files = []
+        open_handles = []
+        try:
+            for file_path in args.api_files:
+                p = Path(file_path)
+                handle = p.open("rb")
+                open_handles.append(handle)
+                content_type = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+                multipart_files.append(("files", (p.name, handle, content_type)))
+
+            create_payload = {
+                "user_id": args.user_id,
+                "title": args.api_exam_title,
+                "mode": args.api_exam_mode,
+            }
+            req_started = time.time()
+            try:
+                r_create = client.post("/exams/from-upload", data=create_payload, files=multipart_files)
+            except httpx.TimeoutException as exc:
+                elapsed = time.time() - req_started
+                raise SystemExit(
+                    f"API call timed out after {elapsed:.1f}s on POST /exams/from-upload. "
+                    f"Increase --api_timeout (current: {args.api_timeout})."
+                ) from exc
+            created = _require_ok(r_create, "POST", "/exams/from-upload")
+            exam_id = created.get("exam_id")
+            if not exam_id:
+                raise SystemExit("Missing exam_id in create response")
+        finally:
+            for handle in open_handles:
+                handle.close()
+
+        r_exams = client.get("/exams", params={"user_id": args.user_id, "limit": 20})
+        _require_ok(r_exams, "GET", "/exams")
+
+        r_exam = client.get(f"/exams/{exam_id}", params={"user_id": args.user_id})
+        _require_ok(r_exam, "GET", f"/exams/{exam_id}")
+
+        r_topics = client.get(f"/exams/{exam_id}/topics")
+        topics_payload = _require_ok(r_topics, "GET", f"/exams/{exam_id}/topics")
+        topics = topics_payload.get("topics") or []
+        topic_id: Optional[str] = topics[0].get("topic_id") if topics else None
+
+        if topic_id:
+            r_generate = client.post(
+                f"/exams/{exam_id}/topics/{topic_id}/cards/generate",
+                json={"user_id": args.user_id, "difficulty": args.api_difficulty},
+            )
+            _require_ok(
+                r_generate,
+                "POST",
+                f"/exams/{exam_id}/topics/{topic_id}/cards/generate",
+            )
+        else:
+            print("No topics found, skipping single-card generation step.")
+
+        r_cards = client.get(f"/exams/{exam_id}/cards", params={"limit": 50})
+        cards_payload = _require_ok(r_cards, "GET", f"/exams/{exam_id}/cards")
+        cards = cards_payload.get("cards") or []
+        if not cards:
+            raise SystemExit("No cards returned from /cards; cannot continue with review flow")
+        card_id = cards[0].get("card_id")
+        if not card_id:
+            raise SystemExit("First card response is missing card_id")
+
+        r_next = client.get(f"/exams/{exam_id}/session/next-card", params={"user_id": args.user_id})
+        _require_ok(r_next, "GET", f"/exams/{exam_id}/session/next-card")
+
+        review_headers = {"Idempotency-Key": f"cli-{exam_id}-{card_id}-{args.api_rating}"}
+        r_review = client.post(
+            f"/exams/{exam_id}/cards/{card_id}/review",
+            data={"user_id": args.user_id, "rating": args.api_rating},
+            headers=review_headers,
+        )
+        _require_ok(r_review, "POST", f"/exams/{exam_id}/cards/{card_id}/review")
+
+        r_progress = client.get(f"/exams/{exam_id}/progress", params={"user_id": args.user_id})
+        _require_ok(r_progress, "GET", f"/exams/{exam_id}/progress")
+
+        r_prev = client.get(f"/exams/{exam_id}/session/previous-card", params={"user_id": args.user_id})
+        _require_ok(r_prev, "GET", f"/exams/{exam_id}/session/previous-card")
+
+        r_history = client.get(
+            f"/exams/{exam_id}/cards/presented-history",
+            params={"user_id": args.user_id, "limit": 20},
+        )
+        _require_ok(r_history, "GET", f"/exams/{exam_id}/cards/presented-history")
+
+    elapsed = time.time() - start_time
+    print("\n=== API SMOKE COMPLETED ===")
+    print(f"Exam ID: {exam_id}")
+    print(f"Cards returned: {len(cards)}")
+    print(f"Elapsed: {elapsed:.2f}s")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -199,17 +358,47 @@ def main():
     p.add_argument("--min_score", type=float, default=0.4)
     p.add_argument("--demo", nargs="+", help="Full demo: ingest docs, create exam, build topics, generate cards")
     p.add_argument("--quiet", action="store_true", help="Suppress logging output for clean demo")
+    p.add_argument("--api_smoke", action="store_true", help="Call HTTP API endpoints end-to-end and print results")
+    p.add_argument("--api_base_url", default="http://127.0.0.1:8000", help="FastAPI base URL for --api_smoke")
+    p.add_argument("--api_files", nargs="+", help="document paths used by /exams/from-upload in --api_smoke")
+    p.add_argument("--api_exam_title", default="CLI API Smoke Exam", help="exam title for --api_smoke")
+    p.add_argument("--api_exam_mode", default="mastery", help="mastery|exam for --api_smoke")
+    p.add_argument("--api_difficulty", type=int, default=1, help="difficulty for single-card generation in --api_smoke")
+    p.add_argument(
+        "--api_rating",
+        default="almost_knew",
+        choices=["i_knew_it", "almost_knew", "learned_now", "dont_understand"],
+        help="rating used in review step for --api_smoke",
+    )
+    p.add_argument("--api_timeout", type=float, default=300.0, help="request timeout seconds for --api_smoke")
+    p.add_argument("--out_txt", help="write all CLI print output to this txt file")
     args = p.parse_args()
+
+    original_stdout = sys.stdout
+    output_handle = None
+    if args.out_txt:
+        out_path = Path(args.out_txt)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        output_handle = out_path.open("w", encoding="utf-8")
+        sys.stdout = TeeTextOutput(original_stdout, output_handle)
+        print(f"Writing CLI output to: {out_path.resolve()}")
 
     store = VectorStore()
 
     try:
         _run(args, store)
     finally:
+        if output_handle is not None:
+            sys.stdout = original_stdout
+            output_handle.close()
         # store.db.close();
         pass
 
 def _run(args, store):
+    if args.api_smoke:
+        run_api_smoke(args)
+        return
+
     # === DEMO MODE: Full automated flow with beautiful output ===
     if args.demo:
         # Suppress all logging for clean presentation

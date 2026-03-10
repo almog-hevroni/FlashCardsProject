@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import math
 from typing import Dict, List, Optional, Sequence
 
 from app.data.db_engine import get_db
@@ -109,14 +110,17 @@ class DiagnosticLifecycleService:
             self._cleanup_failed_bootstrap(user_id=user_id, exam_id=exam_id)
             raise DiagnosticBootstrapError("No topics built for diagnostic bootstrap.")
 
-        cards = generate_starter_cards_v2(
-            exam_id=exam_id,
-            user_id=user_id,
-            n=topic_count,
-            difficulty=1,
-            card_type="diagnostic",
-            store=self.store,
-        )
+        try:
+            cards = generate_starter_cards_v2(
+                exam_id=exam_id,
+                user_id=user_id,
+                n=topic_count,
+                difficulty=1,
+                card_type="diagnostic",
+                store=self.store,
+            )
+        except Exception as exc:
+            raise
         cards_generated = len(cards)
         self.repo.add_event(
             user_id=user_id,
@@ -124,10 +128,12 @@ class DiagnosticLifecycleService:
             type="diagnostic_cards_generated",
             payload={"cards_generated": cards_generated, "topics_targeted": topic_count},
         )
-        if cards_generated < topic_count:
+        minimum_required_cards = max(1, math.ceil(topic_count * 0.8))
+        if cards_generated < minimum_required_cards:
             self._cleanup_failed_bootstrap(user_id=user_id, exam_id=exam_id)
             raise DiagnosticBootstrapError(
-                f"Graph generated {cards_generated} cards for {topic_count} topics."
+                f"Only {cards_generated} diagnostic cards were created for {topic_count} topics; "
+                f"at least {minimum_required_cards} are required."
             )
 
         now = datetime.now(timezone.utc)
@@ -161,4 +167,5 @@ class DiagnosticLifecycleService:
             cards_generated=cards_generated,
             topic_count=topic_count,
         )
+
 

@@ -35,3 +35,5 @@ backend/uploads/
 .cursor/
 
 plan/
+
+backend/api_smoke_output.txt

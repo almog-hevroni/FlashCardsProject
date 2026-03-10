@@ -211,6 +211,12 @@ async def list_topics_endpoint(exam_id: str):
 @app.post("/exams/{exam_id}/topics/{topic_id}/cards/generate", response_model=GenerateSingleCardResponse)
 async def generate_single_card_endpoint(exam_id: str, topic_id: str, req: GenerateSingleCardRequest):
     store = VectorStore()
+    exam = store.db.get_exam(exam_id)
+    if exam is None:
+        return GenerateSingleCardResponse(card=None, error=f"Exam not found: {exam_id}")
+    if store.vector_backend == "pinecone":
+        namespace = f"u:{exam.user_id}|e:{exam_id}"
+        store.set_namespace(namespace)
     topic_map = {t.topic_id: t for t in store.db.list_topics(exam_id=exam_id)}
     topic = topic_map.get(topic_id)
     if topic is None:

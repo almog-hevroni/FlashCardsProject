@@ -138,7 +138,82 @@ def init_db() -> None:
 
     """
     Base.metadata.create_all(bind=engine)
+    _apply_sqlite_compat_migrations()
     logger.info("Database tables created/verified")
+
+
+def _apply_sqlite_compat_migrations() -> None:
+    """
+    Apply lightweight SQLite-only compatibility migrations for legacy local DBs.
+
+    SQLite create_all() does not add columns to existing tables. Older local DBs
+    may miss newly introduced exam lifecycle columns and crash on SELECT.
+    """
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+
+    required_exam_columns = {
+        "state": "ALTER TABLE exams ADD COLUMN state VARCHAR(32) DEFAULT 'diagnostic'",
+        "diagnostic_total": "ALTER TABLE exams ADD COLUMN diagnostic_total INTEGER DEFAULT 0",
+        "diagnostic_answered": "ALTER TABLE exams ADD COLUMN diagnostic_answered INTEGER DEFAULT 0",
+        "diagnostic_started_at": "ALTER TABLE exams ADD COLUMN diagnostic_started_at DATETIME",
+        "diagnostic_completed_at": "ALTER TABLE exams ADD COLUMN diagnostic_completed_at DATETIME",
+    }
+    required_card_columns = {
+        "card_type": "ALTER TABLE cards ADD COLUMN card_type VARCHAR(32) DEFAULT 'learning'",
+        "retired_at": "ALTER TABLE cards ADD COLUMN retired_at DATETIME",
+        "supersedes_card_id": "ALTER TABLE cards ADD COLUMN supersedes_card_id VARCHAR(64)",
+    }
+    required_card_scheduling_columns = {
+        "state": "ALTER TABLE card_scheduling ADD COLUMN state VARCHAR(16) DEFAULT 'new'",
+        "interval_days": "ALTER TABLE card_scheduling ADD COLUMN interval_days FLOAT DEFAULT 1.0",
+        "ease": "ALTER TABLE card_scheduling ADD COLUMN ease FLOAT DEFAULT 2.5",
+        "reps": "ALTER TABLE card_scheduling ADD COLUMN reps INTEGER DEFAULT 0",
+        "lapses": "ALTER TABLE card_scheduling ADD COLUMN lapses INTEGER DEFAULT 0",
+        "last_reviewed_at": "ALTER TABLE card_scheduling ADD COLUMN last_reviewed_at DATETIME",
+    }
+    required_topic_proficiency_columns = {
+        "current_difficulty": "ALTER TABLE topic_proficiency ADD COLUMN current_difficulty INTEGER DEFAULT 1",
+        "streak_up": "ALTER TABLE topic_proficiency ADD COLUMN streak_up INTEGER DEFAULT 0",
+        "streak_down": "ALTER TABLE topic_proficiency ADD COLUMN streak_down INTEGER DEFAULT 0",
+        "seen_count": "ALTER TABLE topic_proficiency ADD COLUMN seen_count INTEGER DEFAULT 0",
+        "correctish_count": "ALTER TABLE topic_proficiency ADD COLUMN correctish_count INTEGER DEFAULT 0",
+        "last_updated_at": "ALTER TABLE topic_proficiency ADD COLUMN last_updated_at DATETIME",
+        "info": "ALTER TABLE topic_proficiency ADD COLUMN info JSON",
+    }
+
+    with engine.begin() as conn:
+        exam_rows = conn.execute(text("PRAGMA table_info(exams)")).mappings().all()
+        if exam_rows:
+            existing_exam = {str(r["name"]) for r in exam_rows}
+            for col, ddl in required_exam_columns.items():
+                if col not in existing_exam:
+                    conn.execute(text(ddl))
+                    logger.warning("Applied SQLite compatibility migration: added exams.%s", col)
+
+        card_rows = conn.execute(text("PRAGMA table_info(cards)")).mappings().all()
+        if card_rows:
+            existing_cards = {str(r["name"]) for r in card_rows}
+            for col, ddl in required_card_columns.items():
+                if col not in existing_cards:
+                    conn.execute(text(ddl))
+                    logger.warning("Applied SQLite compatibility migration: added cards.%s", col)
+
+        scheduling_rows = conn.execute(text("PRAGMA table_info(card_scheduling)")).mappings().all()
+        if scheduling_rows:
+            existing_sched = {str(r["name"]) for r in scheduling_rows}
+            for col, ddl in required_card_scheduling_columns.items():
+                if col not in existing_sched:
+                    conn.execute(text(ddl))
+                    logger.warning("Applied SQLite compatibility migration: added card_scheduling.%s", col)
+
+        topic_prof_rows = conn.execute(text("PRAGMA table_info(topic_proficiency)")).mappings().all()
+        if topic_prof_rows:
+            existing_prof = {str(r["name"]) for r in topic_prof_rows}
+            for col, ddl in required_topic_proficiency_columns.items():
+                if col not in existing_prof:
+                    conn.execute(text(ddl))
+                    logger.warning("Applied SQLite compatibility migration: added topic_proficiency.%s", col)
 
 
 def drop_all_tables() -> None:

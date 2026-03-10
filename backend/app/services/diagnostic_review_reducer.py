@@ -146,8 +146,9 @@ class DiagnosticReviewReducer:
             raise ValueError("Card is not a diagnostic card")
 
         links = self.repo.list_card_topics(card_id=card_id, session=session)
-        if not links:
-            # Fallback for older cards that rely on card.topic_id.
+        primary_count = sum(1 for x in links if x.role == "primary")
+        if not links or primary_count != 1:
+            # Fallback/heal for legacy or malformed card-topic links.
             self.repo.replace_card_topics(
                 card_id=card_id,
                 topics=[{"topic_id": card.topic_id, "role": "primary", "weight": 1.0}],

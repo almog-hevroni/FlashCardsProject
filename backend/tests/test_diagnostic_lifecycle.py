@@ -198,6 +198,70 @@ class DiagnosticLifecycleTests(unittest.TestCase):
             dl_mod.build_topics_for_exam = original_build_topics
             dl_mod.generate_starter_cards_v2 = original_generate
 
+    def test_bootstrap_allows_coverage_at_or_above_80_percent(self) -> None:
+        from app.services import diagnostic_lifecycle as dl_mod
+
+        original_build_topics = dl_mod.build_topics_for_exam
+        original_generate = dl_mod.generate_starter_cards_v2
+
+        def fake_build_topics_for_exam(*, exam_id, store, overwrite=True):
+            topic_ids = ["tA", "tB", "tC", "tD", "tE"]
+            for tid in topic_ids:
+                store.db.upsert_topic(topic_id=tid, exam_id=exam_id, label=f"Topic {tid}", info={"n_chunks": 1})
+            return [{"topic_id": tid, "label": f"Topic {tid}"} for tid in topic_ids]
+
+        def fake_generate_partial_but_ok(*, exam_id, user_id, n, difficulty, card_type="learning", store=None, max_workers=5):
+            assert store is not None
+            cards = []
+            # 4/5 coverage = 80% and should be accepted.
+            for i, tid in enumerate(["tA", "tB", "tC", "tD"], start=1):
+                cid = f"diag_card_{i}"
+                store.db.upsert_card(
+                    card_id=cid,
+                    exam_id=exam_id,
+                    topic_id=tid,
+                    question=f"Q{i}",
+                    answer=f"A{i}",
+                    difficulty=1,
+                    card_type="diagnostic",
+                    status="active",
+                    info={"source": "test"},
+                )
+                store.db.replace_card_topics(
+                    card_id=cid,
+                    topics=[{"topic_id": tid, "role": "primary", "weight": 1.0}],
+                )
+                cards.append(
+                    GeneratedCard(
+                        card_id=cid,
+                        exam_id=exam_id,
+                        topic_id=tid,
+                        topic_label=f"Topic {tid}",
+                        question=f"Q{i}",
+                        answer=f"A{i}",
+                        difficulty=1,
+                        proofs=[],
+                    )
+                )
+            return cards
+
+        dl_mod.build_topics_for_exam = fake_build_topics_for_exam
+        dl_mod.generate_starter_cards_v2 = fake_generate_partial_but_ok
+        try:
+            d1 = _write_text_doc("p3_bootstrap_80pct.txt", "alpha beta gamma")
+            resp = self.client.post(
+                "/exams/from-upload",
+                data={"user_id": "u3", "title": "Exam 80%", "mode": "mastery"},
+                files=[("files", ("p3_bootstrap_80pct.txt", Path(d1).read_text(encoding="utf-8"), "text/plain"))],
+            )
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertEqual(payload["state"], "diagnostic")
+            self.assertEqual(payload["diagnostic_total"], 5)
+        finally:
+            dl_mod.build_topics_for_exam = original_build_topics
+            dl_mod.generate_starter_cards_v2 = original_generate
+
 
 if __name__ == "__main__":
     unittest.main()
