@@ -51,6 +51,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "strengthen_min_score_delta": 0.05,
     "commit_retry_attempts": 3,
     "commit_retry_sleep_s": 0.25,
+    "graph_recursion_limit": 80,
 }
 
 
@@ -666,7 +667,10 @@ def _run_question_phase(
     }
     
     graph = build_card_graph()
-    final_state = graph.invoke(initial_state)
+    final_state = graph.invoke(
+        initial_state,
+        config={"recursion_limit": int(DEFAULT_CONFIG["graph_recursion_limit"])},
+    )
     
     # Check if we got a valid question + embedding
     if final_state.get("question") and final_state.get("question_id"):
@@ -796,7 +800,10 @@ def generate_single_card(
     }
     
     graph = build_card_graph()
-    final_state = graph.invoke(initial_state)
+    final_state = graph.invoke(
+        initial_state,
+        config={"recursion_limit": int(DEFAULT_CONFIG["graph_recursion_limit"])},
+    )
     
     return final_state.get("card")
 

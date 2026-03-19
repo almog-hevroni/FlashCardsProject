@@ -15,6 +15,16 @@ from app.services.llm import CHAT_MODEL_FAST, chat_completions_create
 from app.utils.vectors import l2_normalize
 from app.services.context_packs import build_representative_chunk_pack
 
+try:
+    import hdbscan  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    hdbscan = None
+
+try:
+    import umap  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    umap = None
+
 
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "as", "by",
@@ -318,6 +328,190 @@ def _pick_k(num_chunks: int) -> int:
     return max(2, min(12, k))
 
 
+def _pick_hdbscan_min_cluster_size(num_chunks: int) -> int:
+    if num_chunks <= 10:
+        return 2
+    return max(4, min(24, int(round(0.04 * num_chunks))))
+
+
+def _pick_hdbscan_min_samples(min_cluster_size: int) -> int:
+    return max(2, int(min_cluster_size // 2))
+
+
+def _assign_noise_to_nearest_cluster(Xn: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """
+    Ensure each sample has a valid non-negative label by assigning noise (-1)
+    to the nearest existing cluster centroid in cosine space.
+    """
+    assigned = labels.astype("int64", copy=True)
+    cluster_ids = sorted({int(x) for x in assigned.tolist() if int(x) >= 0})
+    if not cluster_ids:
+        assigned[:] = 0
+        return assigned
+
+    centroids: List[np.ndarray] = []
+    for cid in cluster_ids:
+        rows = np.where(assigned == cid)[0]
+        if rows.size == 0:
+            continue
+        centroid = l2_normalize(np.mean(Xn[rows], axis=0, keepdims=True))[0]
+        centroids.append(centroid)
+    if not centroids:
+        assigned[:] = 0
+        return assigned
+
+    C = np.stack(centroids, axis=0)  # (k, d)
+    noise_rows = np.where(assigned < 0)[0]
+    if noise_rows.size == 0:
+        return assigned
+    sims = Xn[noise_rows] @ C.T
+    best = np.argmax(sims, axis=1)
+    for ridx, b in zip(noise_rows.tolist(), best.tolist()):
+        assigned[ridx] = cluster_ids[int(b)]
+    return assigned
+
+
+def _agglomerative_single_link_threshold(Xn: np.ndarray, threshold: float = 0.82) -> np.ndarray:
+    """
+    Single-link agglomerative clustering approximation:
+    build graph edges where cosine similarity >= threshold and return connected components.
+    """
+    n = Xn.shape[0]
+    if n == 0:
+        return np.zeros((0,), dtype="int64")
+    if n == 1:
+        return np.zeros((1,), dtype="int64")
+
+    parent = np.arange(n, dtype="int64")
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = int(parent[x])
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    sims = Xn @ Xn.T
+    for i in range(n):
+        for j in range(i + 1, n):
+            if float(sims[i, j]) >= float(threshold):
+                union(i, j)
+
+    root_to_label: Dict[int, int] = {}
+    labels = np.zeros((n,), dtype="int64")
+    next_label = 0
+    for i in range(n):
+        r = find(i)
+        if r not in root_to_label:
+            root_to_label[r] = next_label
+            next_label += 1
+        labels[i] = root_to_label[r]
+    return labels
+
+
+def _cluster_topic_embeddings(
+    *,
+    X: np.ndarray,
+    seed: int,
+    algorithm: str = "hdbscan",
+    use_umap: bool = False,
+    umap_n_components: int = 15,
+    umap_min_chunk_count: int = 300,
+    hdbscan_min_cluster_size: Optional[int] = None,
+    hdbscan_min_samples: Optional[int] = None,
+    agglomerative_threshold: float = 0.82,
+) -> tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Cluster chunk embeddings for topics using adaptive methods.
+    Returns (assignments, metadata).
+    """
+    n, d = X.shape
+    if n == 0:
+        return np.zeros((0,), dtype="int64"), {"method": "none"}
+    if n == 1:
+        return np.zeros((1,), dtype="int64"), {"method": "singleton"}
+
+    Xn = l2_normalize(X.astype("float32", copy=False))
+    algo = (algorithm or "hdbscan").strip().lower()
+
+    # Final safety net: preserve legacy behavior if explicitly requested.
+    if algo == "kmeans":
+        k = min(_pick_k(n), n)
+        assign = _kmeans_cluster(Xn, k=k, seed=seed)
+        return assign, {"method": "kmeans_embeddings", "k": int(k), "seed": int(seed)}
+
+    mcs = int(hdbscan_min_cluster_size or _pick_hdbscan_min_cluster_size(n))
+    mcs = max(2, min(mcs, n))
+    ms = int(hdbscan_min_samples or _pick_hdbscan_min_samples(mcs))
+    ms = max(1, min(ms, n - 1))
+
+    if hdbscan is not None and algo in {"hdbscan", "auto"}:
+        try:
+            fit_X = Xn
+            umap_used = False
+            if use_umap and umap is not None and n >= int(umap_min_chunk_count):
+                n_components = max(2, min(int(umap_n_components), d))
+                n_neighbors = max(5, min(30, int(round(np.sqrt(n)))))
+                reducer = umap.UMAP(
+                    n_neighbors=n_neighbors,
+                    n_components=n_components,
+                    min_dist=0.0,
+                    metric="cosine",
+                    random_state=seed,
+                )
+                fit_X = reducer.fit_transform(Xn)
+                umap_used = True
+
+            # On L2-normalized vectors, euclidean distance preserves cosine ordering.
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=mcs,
+                min_samples=ms,
+                metric="euclidean",
+                cluster_selection_method="eom",
+            )
+            labels = clusterer.fit_predict(fit_X).astype("int64")
+            if np.all(labels < 0):
+                raise RuntimeError("HDBSCAN labeled all points as noise")
+
+            labels = _assign_noise_to_nearest_cluster(Xn, labels)
+            n_clusters = int(len(set(labels.tolist())))
+            return labels, {
+                "method": "hdbscan_embeddings",
+                "seed": int(seed),
+                "hdbscan_min_cluster_size": int(mcs),
+                "hdbscan_min_samples": int(ms),
+                "use_umap": bool(umap_used),
+                "umap_n_components": int(umap_n_components) if umap_used else None,
+                "n_clusters": n_clusters,
+            }
+        except Exception as exc:
+            # Fall through to threshold clustering and then kmeans safety net.
+            _ = exc
+
+    # First fallback: non-fixed-k thresholded single-link clustering.
+    try:
+        labels = _agglomerative_single_link_threshold(Xn, threshold=float(agglomerative_threshold))
+        n_clusters = int(len(set(labels.tolist())))
+        if n_clusters >= 2:
+            return labels, {
+                "method": "agglomerative_cosine_threshold",
+                "seed": int(seed),
+                "agglomerative_threshold": float(agglomerative_threshold),
+                "n_clusters": n_clusters,
+            }
+    except Exception as exc:
+        _ = exc
+
+    # Final fallback: legacy cosine-kmeans.
+    k = min(_pick_k(n), n)
+    labels = _kmeans_cluster(Xn, k=k, seed=seed)
+    return labels, {"method": "kmeans_embeddings", "k": int(k), "seed": int(seed)}
+
+
 def _merge_clusters_by_centroid(
     *,
     clusters: List[tuple[int, List[str]]],
@@ -408,6 +602,13 @@ def build_topics_for_exam(
     use_llm_labels: bool = True,
     llm_model: str = CHAT_MODEL_FAST,
     merge_threshold: float = 0.88,
+    topic_cluster_algorithm: str = "hdbscan",
+    use_umap: bool = False,
+    umap_n_components: int = 15,
+    umap_min_chunk_count: int = 300,
+    hdbscan_min_cluster_size: Optional[int] = None,
+    hdbscan_min_samples: Optional[int] = None,
+    agglomerative_threshold: float = 0.82,
 ) -> List[BuiltTopic]:
     """
     Build semantic topics for an exam by clustering chunk embeddings and producing grounded labels + evidence.
@@ -445,8 +646,17 @@ def build_topics_for_exam(
     Xn = l2_normalize(X.astype("float32", copy=False))
 
     # 3) cluster
-    k = min(_pick_k(len(resolved_ids)), len(resolved_ids))
-    assign = _kmeans_cluster(X, k=k, seed=seed)
+    assign, cluster_meta = _cluster_topic_embeddings(
+        X=X,
+        seed=seed,
+        algorithm=topic_cluster_algorithm,
+        use_umap=use_umap,
+        umap_n_components=umap_n_components,
+        umap_min_chunk_count=umap_min_chunk_count,
+        hdbscan_min_cluster_size=hdbscan_min_cluster_size,
+        hdbscan_min_samples=hdbscan_min_samples,
+        agglomerative_threshold=agglomerative_threshold,
+    )
     # Drop empty clusters and re-index to contiguous ids
     groups: Dict[int, List[str]] = {}
     for cid, a in zip(resolved_ids, assign.tolist()):
@@ -509,9 +719,19 @@ def build_topics_for_exam(
                 pass
         info = {
             "n_chunks": len(cids),
-            "method": "kmeans_embeddings",
-            "k": int(k),
+            "method": str(cluster_meta.get("method") or "unknown"),
+            "k": cluster_meta.get("k"),
             "seed": int(seed),
+            "cluster_params": {
+                "algorithm": topic_cluster_algorithm,
+                "use_umap": bool(use_umap),
+                "umap_n_components": int(umap_n_components),
+                "umap_min_chunk_count": int(umap_min_chunk_count),
+                "hdbscan_min_cluster_size": hdbscan_min_cluster_size,
+                "hdbscan_min_samples": hdbscan_min_samples,
+                "agglomerative_threshold": float(agglomerative_threshold),
+            },
+            "cluster_stats": cluster_meta,
             "label_source": label_source,
             "merged_from_clusters": merged.get("cluster_ids", []),
             "merge_sims": merged.get("merge_sims", []),

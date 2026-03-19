@@ -349,6 +349,18 @@ def main():
     p.add_argument("--exam_id", help="existing exam id (to attach documents or inspect)")
     p.add_argument("--build_topics", action="store_true", help="build topics for --exam_id")
     p.add_argument("--topic_merge_threshold", type=float, default=0.88, help="merge topics if centroid similarity >= threshold (default 0.88)")
+    p.add_argument(
+        "--topic_cluster_algorithm",
+        default="hdbscan",
+        choices=["hdbscan", "auto", "kmeans"],
+        help="topic clustering algorithm (default: hdbscan)",
+    )
+    p.add_argument("--topic_use_umap", action="store_true", help="enable optional UMAP reduction before HDBSCAN on large chunk sets")
+    p.add_argument("--topic_umap_n_components", type=int, default=15, help="UMAP components when --topic_use_umap is enabled")
+    p.add_argument("--topic_umap_min_chunk_count", type=int, default=300, help="minimum chunk count before applying UMAP")
+    p.add_argument("--topic_hdbscan_min_cluster_size", type=int, help="override HDBSCAN min_cluster_size")
+    p.add_argument("--topic_hdbscan_min_samples", type=int, help="override HDBSCAN min_samples")
+    p.add_argument("--topic_agglomerative_threshold", type=float, default=0.82, help="fallback agglomerative cosine threshold")
     p.add_argument("--topic_id", help="optional: restrict --ask/--answer to this topic_id")
     p.add_argument("--auto_topic", action="store_true", help="auto-route question to topic within --exam_id (for --answer)")
     p.add_argument("--gen_starter_cards", action="store_true", help="generate starter flashcards for --exam_id (requires topics)")
@@ -469,6 +481,13 @@ def _run(args, store):
             store=store,
             overwrite=True,
             merge_threshold=args.topic_merge_threshold,
+            topic_cluster_algorithm=args.topic_cluster_algorithm,
+            use_umap=args.topic_use_umap,
+            umap_n_components=args.topic_umap_n_components,
+            umap_min_chunk_count=args.topic_umap_min_chunk_count,
+            hdbscan_min_cluster_size=args.topic_hdbscan_min_cluster_size,
+            hdbscan_min_samples=args.topic_hdbscan_min_samples,
+            agglomerative_threshold=args.topic_agglomerative_threshold,
         )
         topic_list = list_topics_for_exam(exam_id=exam_id, store=store)
         
@@ -577,6 +596,13 @@ def _run(args, store):
             store=store,
             overwrite=True,
             merge_threshold=args.topic_merge_threshold,
+            topic_cluster_algorithm=args.topic_cluster_algorithm,
+            use_umap=args.topic_use_umap,
+            umap_n_components=args.topic_umap_n_components,
+            umap_min_chunk_count=args.topic_umap_min_chunk_count,
+            hdbscan_min_cluster_size=args.topic_hdbscan_min_cluster_size,
+            hdbscan_min_samples=args.topic_hdbscan_min_samples,
+            agglomerative_threshold=args.topic_agglomerative_threshold,
         )
         print(f"Built {len(topics)} topic(s) for exam_id={args.exam_id}")
         for t in list_topics_for_exam(exam_id=args.exam_id, store=store):
