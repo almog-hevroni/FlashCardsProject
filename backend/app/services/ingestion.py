@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_TARGET_CHARS = 1400
 _CHUNK_OVERLAP = 200
+_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+
+
+class UnsupportedDocumentTypeError(ValueError):
+    """Raised when attempting to ingest a file with an unsupported extension."""
 
 
 @dataclass
@@ -38,9 +43,15 @@ def _detect_loader(path: str):
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
         return load_pdf
-    if ext in [".docx"]:
+    if ext == ".docx":
         return load_docx
-    return load_txt
+    if ext == ".txt":
+        return load_txt
+    supported = ", ".join(sorted(_SUPPORTED_EXTENSIONS))
+    raise UnsupportedDocumentTypeError(
+        f"Unsupported document type for '{Path(path).name}': '{ext or '(no extension)'}'. "
+        f"Supported types: {supported}."
+    )
 
 
 def _ingest_single(

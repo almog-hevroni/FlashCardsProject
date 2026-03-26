@@ -32,6 +32,7 @@ from app.data.vector_store import VectorStore
 from app.services.diagnostic_lifecycle import DiagnosticBootstrapError, DiagnosticLifecycleService
 from app.services.exams import ImmutableExamError
 from app.services.graph import generate_single_card
+from app.services.ingestion import UnsupportedDocumentTypeError
 from app.services.review_service import ReviewService
 from app.services.session_planner import SessionPlannerService
 from app.services.context_packs import build_diverse_chunk_pack
@@ -134,6 +135,11 @@ async def create_exam_from_upload_endpoint(
             mode=mode,
             paths=[str(p) for p in temp_paths],
             info={"source": "from_upload", "filenames": filenames},
+        )
+    except UnsupportedDocumentTypeError as exc:
+        return JSONResponse(
+            {"error": "unsupported_document_type", "message": str(exc)},
+            status_code=422,
         )
     except DiagnosticBootstrapError as exc:
         return JSONResponse(

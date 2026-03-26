@@ -330,7 +330,7 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
 )
 
-from app.services.ingestion import ingest_documents
+from app.services.ingestion import UnsupportedDocumentTypeError, ingest_documents
 from app.services.retrieval import retrieve_with_proofs
 from app.data.vector_store import VectorStore
 from app.services.qa import generate_answer
@@ -454,7 +454,10 @@ def _run(args, store):
         print_step_header(2, 4, "Ingesting Documents", "📄")
         
         print_info("Processing documents...")
-        results = ingest_documents(args.demo, store, user_id=args.user_id, exam_id=exam_id)
+        try:
+            results = ingest_documents(args.demo, store, user_id=args.user_id, exam_id=exam_id)
+        except UnsupportedDocumentTypeError as exc:
+            raise SystemExit(str(exc)) from exc
         
         for res in results:
             print_success(f"Ingested: {res.doc_id}")
@@ -623,7 +626,10 @@ def _run(args, store):
     if args.ingest:
         if not args.exam_id:
             raise SystemExit("--ingest requires --exam_id when using Pinecone backend")
-        results = ingest_documents(args.ingest, store, user_id=args.user_id, exam_id=args.exam_id)
+        try:
+            results = ingest_documents(args.ingest, store, user_id=args.user_id, exam_id=args.exam_id)
+        except UnsupportedDocumentTypeError as exc:
+            raise SystemExit(str(exc)) from exc
         for res in results:
             print(f"Ingested doc_id={res.doc_id} chunks={res.num_chunks}")
         doc_ids = [res.doc_id for res in results]

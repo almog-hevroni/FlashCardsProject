@@ -13,7 +13,7 @@ from app.data.vector_store import VectorStore
 from app.services.cards import GeneratedCard
 from app.services.exams import create_exam
 from app.services.graph import generate_starter_cards_v2
-from app.services.ingestion import ingest_documents
+from app.services.ingestion import UnsupportedDocumentTypeError, ingest_documents
 from app.services.topics import build_topics_for_exam
 
 
@@ -94,6 +94,9 @@ class DiagnosticLifecycleService:
             )
             doc_ids = [x.doc_id for x in ingest_results]
             self.repo.attach_documents_to_exam(exam_id=exam_id, doc_ids=doc_ids)
+        except UnsupportedDocumentTypeError:
+            self._cleanup_failed_bootstrap(user_id=user_id, exam_id=exam_id)
+            raise
         except Exception as exc:
             self._cleanup_failed_bootstrap(user_id=user_id, exam_id=exam_id)
             raise
