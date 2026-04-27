@@ -1,0 +1,23 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next
+/out
+
+# misc
+.DS_Store
+*.pem
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# local env files
+.env*.local
+
+# test output
+/coverage
+/test-results

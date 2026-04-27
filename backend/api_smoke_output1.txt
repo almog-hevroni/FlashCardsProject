@@ -1,0 +1,759 @@
+Writing CLI output to: C:\Users\vered\CursorProjects\FlashCardsProject\backend\api_smoke_output1.txt
+=== API CLI Smoke Test ===
+API base URL: http://127.0.0.1:8000
+User ID: local_user
+Running endpoint checks in sequence...
+
+POST /exams/from-upload -> 200
+{
+  "exam_id": "bac118cf90a14574",
+  "state": "diagnostic",
+  "diagnostic_total": 4,
+  "diagnostic_answered": 0,
+  "cards_generated": 4,
+  "topic_count": 4
+}
+
+GET /exams -> 200
+{
+  "exams": [
+    {
+      "exam_id": "bac118cf90a14574",
+      "user_id": "local_user",
+      "title": "CLI API Smoke Exam",
+      "mode": "mastery",
+      "created_at": "2026-04-21T11:19:53.760741",
+      "updated_at": "2026-04-21T11:21:16.172923",
+      "info": {
+        "source": "from_upload",
+        "filenames": [
+          "example.pdf",
+          "teacher.pdf"
+        ],
+        "bootstrap_error": null,
+        "state": "diagnostic",
+        "diagnostic_total": 4,
+        "diagnostic_answered": 0,
+        "diagnostic_started_at": "2026-04-21T11:21:16.165035",
+        "diagnostic_completed_at": ""
+      }
+    }
+  ]
+}
+
+GET /exams/bac118cf90a14574 -> 200
+{
+  "exam_id": "bac118cf90a14574",
+  "user_id": "local_user",
+  "title": "CLI API Smoke Exam",
+  "mode": "mastery",
+  "state": "diagnostic",
+  "diagnostic_total": 4,
+  "diagnostic_answered": 0,
+  "diagnostic_started_at": "2026-04-21T11:21:16.165035",
+  "diagnostic_completed_at": "",
+  "created_at": "2026-04-21T11:19:53.760741",
+  "updated_at": "2026-04-21T11:21:16.172923",
+  "info": {
+    "source": "from_upload",
+    "filenames": [
+      "example.pdf",
+      "teacher.pdf"
+    ],
+    "bootstrap_error": null
+  }
+}
+
+GET /exams/bac118cf90a14574/topics -> 200
+{
+  "exam_id": "bac118cf90a14574",
+  "topics": [
+    {
+      "topic_id": "47f66bc739594456",
+      "exam_id": "bac118cf90a14574",
+      "label": "Comparative Evaluation of Test Difficulty",
+      "created_at": "2026-04-21T11:20:18.252609",
+      "n_chunks": 53,
+      "info": {
+        "n_chunks": 53,
+        "method": "hdbscan_embeddings",
+        "k": null,
+        "seed": 0,
+        "cluster_params": {
+          "algorithm": "hdbscan",
+          "use_umap": false,
+          "umap_n_components": 15,
+          "umap_min_chunk_count": 300,
+          "hdbscan_min_cluster_size": null,
+          "hdbscan_min_samples": null,
+          "agglomerative_threshold": 0.82
+        },
+        "cluster_stats": {
+          "method": "hdbscan_embeddings",
+          "seed": 0,
+          "hdbscan_min_cluster_size": 5,
+          "hdbscan_min_samples": 2,
+          "use_umap": false,
+          "umap_n_components": null,
+          "n_clusters": 4
+        },
+        "label_source": "llm",
+        "merged_from_clusters": [
+          0
+        ],
+        "merge_sims": [],
+        "merge_threshold": 0.88
+      }
+    },
+    {
+      "topic_id": "a0d585b55e084865",
+      "exam_id": "bac118cf90a14574",
+      "label": "Adaptive Question Generation with Difficulty Control",
+      "created_at": "2026-04-21T11:20:18.252609",
+      "n_chunks": 38,
+      "info": {
+        "n_chunks": 38,
+        "method": "hdbscan_embeddings",
+        "k": null,
+        "seed": 0,
+        "cluster_params": {
+          "algorithm": "hdbscan",
+          "use_umap": false,
+          "umap_n_components": 15,
+          "umap_min_chunk_count": 300,
+          "hdbscan_min_cluster_size": null,
+          "hdbscan_min_samples": null,
+          "agglomerative_threshold": 0.82
+        },
+        "cluster_stats": {
+          "method": "hdbscan_embeddings",
+          "seed": 0,
+          "hdbscan_min_cluster_size": 5,
+          "hdbscan_min_samples": 2,
+          "use_umap": false,
+          "umap_n_components": null,
+          "n_clusters": 4
+        },
+        "label_source": "llm",
+        "merged_from_clusters": [
+          2
+        ],
+        "merge_sims": [],
+        "merge_threshold": 0.88
+      }
+    },
+    {
+      "topic_id": "3073079210e54813",
+      "exam_id": "bac118cf90a14574",
+      "label": "Cognitive Skills in Introductory Programming",
+      "created_at": "2026-04-21T11:20:18.252609",
+      "n_chunks": 20,
+      "info": {
+        "n_chunks": 20,
+        "method": "hdbscan_embeddings",
+        "k": null,
+        "seed": 0,
+        "cluster_params": {
+          "algorithm": "hdbscan",
+          "use_umap": false,
+          "umap_n_components": 15,
+          "umap_min_chunk_count": 300,
+          "hdbscan_min_cluster_size": null,
+          "hdbscan_min_samples": null,
+          "agglomerative_threshold": 0.82
+        },
+        "cluster_stats": {
+          "method": "hdbscan_embeddings",
+          "seed": 0,
+          "hdbscan_min_cluster_size": 5,
+          "hdbscan_min_samples": 2,
+          "use_umap": false,
+          "umap_n_components": null,
+          "n_clusters": 4
+        },
+        "label_source": "llm",
+        "merged_from_clusters": [
+          1
+        ],
+        "merge_sims": [],
+        "merge_threshold": 0.88
+      }
+    },
+    {
+      "topic_id": "7df9637a97fa4595",
+      "exam_id": "bac118cf90a14574",
+      "label": "Evaluation of Difficulty-Controlled Question Generation",
+      "created_at": "2026-04-21T11:20:18.252609",
+      "n_chunks": 9,
+      "info": {
+        "n_chunks": 9,
+        "method": "hdbscan_embeddings",
+        "k": null,
+        "seed": 0,
+        "cluster_params": {
+          "algorithm": "hdbscan",
+          "use_umap": false,
+          "umap_n_components": 15,
+          "umap_min_chunk_count": 300,
+          "hdbscan_min_cluster_size": null,
+          "hdbscan_min_samples": null,
+          "agglomerative_threshold": 0.82
+        },
+        "cluster_stats": {
+          "method": "hdbscan_embeddings",
+          "seed": 0,
+          "hdbscan_min_cluster_size": 5,
+          "hdbscan_min_samples": 2,
+          "use_umap": false,
+          "umap_n_components": null,
+          "n_clusters": 4
+        },
+        "label_source": "llm",
+        "merged_from_clusters": [
+          3
+        ],
+        "merge_sims": [],
+        "merge_threshold": 0.88
+      }
+    }
+  ]
+}
+
+POST /exams/bac118cf90a14574/topics/47f66bc739594456/cards/generate -> 200
+{
+  "card": {
+    "card_id": "66b2f2f503664392",
+    "exam_id": "bac118cf90a14574",
+    "topic_id": "47f66bc739594456",
+    "topic_label": "Comparative Evaluation of Test Difficulty",
+    "question": "What is the purpose of a computer adaptive test in evaluating test difficulty?",
+    "answer": "The purpose of a computer adaptive test is to adjust the difficulty of questions based on the examinee's ability, providing a more individualized and accurate assessment of their knowledge level.",
+    "difficulty": 1,
+    "created_at": "2026-04-21T11:21:35.879296",
+    "status": "active",
+    "proofs": [
+      {
+        "proof_id": "b37282c4e2014b77a2bf",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 0,
+        "end": 1393,
+        "text": "The solution to this problem may be the application of computer adaptive tests, which have the ability to change the level of question diﬃculty on the basis of the respondents’ abilities similar to in an oral exam. A computer adaptive test oﬀers the ability to create a test based on the respondent’s actual abilities.",
+        "score": 0.6871599793434142
+      },
+      {
+        "proof_id": "cdebebe94c564315bc60",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 1193,
+        "end": 2584,
+        "text": "There are several advantages of computer adaptive tests worth considering, when compared to traditional linear tests, such as • individualization of tests, • promoting a positive attitude toward testing, • determining the level of knowledge with greater accuracy. With the difficulty values determined properly , adaptive algorithms can then select the “right” next question in the test.",
+        "score": 0.7497047305107116
+      },
+      {
+        "proof_id": "c1908d8278164a9caa3e",
+        "doc_id": "e0cf4f4065c2",
+        "page": 7,
+        "start": 3589,
+        "end": 4984,
+        "text": "serve in computerized adaptive testing that adapts to the examinee’s level of ability. This is advantageous from the examinee’s perspective, as the diﬃculty of the exam seems to tailor itself to their level of ability.",
+        "score": 0.7614640951156616
+      }
+    ],
+    "info": {
+      "question_id": "4db0adea59eb4147",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "user_id": "local_user",
+      "validation_score": 1.0,
+      "card_type": "learning"
+    }
+  },
+  "error": null
+}
+
+GET /exams/bac118cf90a14574/cards -> 200
+{
+  "cards": [
+    {
+      "card_id": "b16a149239844827",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "3073079210e54813",
+      "topic_label": "Cognitive Skills in Introductory Programming",
+      "question": "What are the four distinct skills that novices learn incrementally when learning programming?",
+      "answer": "Novices learn the skills of tracing, writing syntax, comprehending templates, and writing code with templates incrementally when learning programming.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:20:43.535681",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "169fba8f638245908740",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 2384,
+          "end": 3779,
+          "text": "The authors used a code-tracing type of task and questions to assess students’ programming skills. It has been conﬁrmed that students cannot learn to write code without having previously learned to read/trace code as a precursory skill [6–8].",
+          "score": 0.5183143824338913
+        },
+        {
+          "proof_id": "f7738207fedb4d4e82a3",
+          "doc_id": "e0cf4f4065c2",
+          "page": 3,
+          "start": 0,
+          "end": 1397,
+          "text": "[11] proposed a theory that identiﬁed four distinct skills that novices learned incrementally. These skills were tracing, writing syntax, comprehending templates, and writing code with templates.",
+          "score": 0.5073173701763153
+        },
+        {
+          "proof_id": "5cda2a8204ec4264aa7f",
+          "doc_id": "e0cf4f4065c2",
+          "page": 20,
+          "start": 2389,
+          "end": 3780,
+          "text": "A theory of instruction for introductory programming skills. A Multi-National Study of Reading and Tracing Skills in Novice Programmers.",
+          "score": 0.4858513206243515
+        }
+      ],
+      "info": {
+        "question_id": "8784c8503d3049f1",
+        "topic_label": "Cognitive Skills in Introductory Programming",
+        "user_id": "local_user",
+        "validation_score": 1.0,
+        "card_type": "diagnostic"
+      }
+    },
+    {
+      "card_id": "7c7b89333ed84c42",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "47f66bc739594456",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "question": "What is the purpose of using a one-sample t-test in the evaluation of test difficulty?",
+      "answer": "A one-sample t-test is used to compare students' and teachers' evaluations of test difficulty, with teachers' evaluations serving as an external standard average.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:20:44.676956",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "e6cb94353bb642ffa9a7",
+          "doc_id": "e0cf4f4065c2",
+          "page": 16,
+          "start": 1198,
+          "end": 2596,
+          "text": "The difference between the teachers’ and the students’ evaluation was examined in a one-sample t-test, where the teachers’ evaluation was viewed as an external standard average (Table 11). Comparing teacher and student estimation of test difficulty.",
+          "score": 0.5386265993118287
+        },
+        {
+          "proof_id": "68a1e4d015b14045b612",
+          "doc_id": "e0cf4f4065c2",
+          "page": 16,
+          "start": 3594,
+          "end": 4211,
+          "text": "Relationship between Student and Teacher Estimations Apart from the students, all questions used in this research were also evaluated by the teachers. The diﬀerence between the teachers’ and the students’ evaluation was examined in a one-sample t-test, where the teachers’ evaluation was viewed as an external standard average (Table 11).",
+          "score": 0.47569559812545775
+        },
+        {
+          "proof_id": "3da488769d174f3485bb",
+          "doc_id": "e0cf4f4065c2",
+          "page": 19,
+          "start": 1197,
+          "end": 2596,
+          "text": "This comparison can help determine the real level of difficulty for a given question, because: • It excludes an estimation that is based only on one teacher opinion or several of them. Significant differences between the estimation of difficulty given by students from different years of study and the teachers may indicate specif ic questions where the probability of giving the correct answer also depends on certain other fact o r s .",
+          "score": 0.49509966075420375
+        }
+      ],
+      "info": {
+        "question_id": "e199984f999449e4",
+        "topic_label": "Comparative Evaluation of Test Difficulty",
+        "user_id": "local_user",
+        "validation_score": 1.0,
+        "card_type": "diagnostic"
+      }
+    },
+    {
+      "card_id": "36863b7e32f946ee",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "a0d585b55e084865",
+      "topic_label": "Adaptive Question Generation with Difficulty Control",
+      "question": "What is the main purpose of the method proposed for creating a training dataset in adaptive question generation?",
+      "answer": "The main purpose of the proposed method is to create a training dataset that includes IRT-based difficulty values, enabling the generation of question–answer pairs with difficulty levels suitable for each learner.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:20:45.749988",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "9cf542f2ec8a49528b26",
+          "doc_id": "81a1645bea32",
+          "page": 2,
+          "start": 2390,
+          "end": 3786,
+          "text": "generating question–answer pairs quantiﬁed with IRT-based difﬁculty. 1) RQ1: Is it possible to generate question–answer pairs by specifying arbitrary IRT-based difﬁculty values?",
+          "score": 0.5953634083271027
+        },
+        {
+          "proof_id": "a620ffdfadb94c1ca73a",
+          "doc_id": "81a1645bea32",
+          "page": 5,
+          "start": 1190,
+          "end": 2587,
+          "text": "Because our difﬁculty-controllable QG method requires a dataset with IRT-based difﬁculty values for model training, we ﬁrst propose a method for constructing it in the next section. Thus, we ﬁrst propose a method for extending the SQuAD dataset by appending the IRT-based difﬁculty values for each question–answer pair.",
+          "score": 0.5878801047801971
+        },
+        {
+          "proof_id": "255f5c84c306421ea21b",
+          "doc_id": "81a1645bea32",
+          "page": 11,
+          "start": 2392,
+          "end": 3789,
+          "text": "parameter θ of learners is unknown, adaptive generation enables more efﬁcient estimation of θ compared to random question posing. Our ﬁrst research question was, “Is it possible to generate question–answer pairs by specifying arbitrary IRT-based difﬁculty values?” We conclude that our method makes this possible because our experiments demonstrated that the speciﬁed IRT-based difﬁculty values correlate well with the correct answer rates of both QA systems and human respondents.",
+          "score": 0.5795327723026276
+        }
+      ],
+      "info": {
+        "question_id": "16a54b6720e54141",
+        "topic_label": "Adaptive Question Generation with Difficulty Control",
+        "user_id": "local_user",
+        "validation_score": 0.9,
+        "card_type": "diagnostic"
+      }
+    },
+    {
+      "card_id": "9917e54c474a4cc7",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "7df9637a97fa4595",
+      "topic_label": "Evaluation of Difficulty-Controlled Question Generation",
+      "question": "What are the two evaluation criteria used by raters to assess the generated question-answer pairs?",
+      "answer": "The two evaluation criteria used by raters are answerability and content relevance.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:21:14.657168",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "12de45d593b0417190ff",
+          "doc_id": "81a1645bea32",
+          "page": 10,
+          "start": 0,
+          "end": 1395,
+          "text": "6 The raters were asked to assess the assigned question–answer pairs based on the following evaluation criteria. 2) Content Relevance: Assess whether the generated questions were relevant to the reading passage.",
+          "score": 0.6369525372982026
+        },
+        {
+          "proof_id": "0285035cdd314286854f",
+          "doc_id": "81a1645bea32",
+          "page": 10,
+          "start": 1195,
+          "end": 2590,
+          "text": "Moreover, in over 60% of cases, question and answer pairs were generated that were answerable, and nearly 90% were partially appropriate when accepting excessive or insufﬁcient results. To assess the reason for this outcome, we determined the agreement ratio between the two raters for",
+          "score": 0.5195586562156678
+        },
+        {
+          "proof_id": "9f36efa723014500ae6d",
+          "doc_id": "81a1645bea32",
+          "page": 10,
+          "start": 2390,
+          "end": 3788,
+          "text": "The results showed that the agreement rates for ﬂuency, content relevance, answerability, and practicality were 0.63, 0.85, 0.53, and 0.60, respectively, while that for difﬁculty was 0.22. From these results, we conclude that it is hard to ensure reliable subjective evaluations for question difﬁculty, while the evaluations for other criteria seem acceptable.",
+          "score": 0.5701278865337371
+        }
+      ],
+      "info": {
+        "question_id": "63a5e2a13d514ee1",
+        "topic_label": "Evaluation of Difficulty-Controlled Question Generation",
+        "user_id": "local_user",
+        "validation_score": 0.7,
+        "card_type": "diagnostic"
+      }
+    },
+    {
+      "card_id": "66b2f2f503664392",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "47f66bc739594456",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "question": "What is the purpose of a computer adaptive test in evaluating test difficulty?",
+      "answer": "The purpose of a computer adaptive test is to adjust the difficulty of questions based on the examinee's ability, providing a more individualized and accurate assessment of their knowledge level.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:21:35.879296",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "b37282c4e2014b77a2bf",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 0,
+          "end": 1393,
+          "text": "The solution to this problem may be the application of computer adaptive tests, which have the ability to change the level of question diﬃculty on the basis of the respondents’ abilities similar to in an oral exam. A computer adaptive test oﬀers the ability to create a test based on the respondent’s actual abilities.",
+          "score": 0.6871599793434142
+        },
+        {
+          "proof_id": "cdebebe94c564315bc60",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 1193,
+          "end": 2584,
+          "text": "There are several advantages of computer adaptive tests worth considering, when compared to traditional linear tests, such as • individualization of tests, • promoting a positive attitude toward testing, • determining the level of knowledge with greater accuracy. With the difficulty values determined properly , adaptive algorithms can then select the “right” next question in the test.",
+          "score": 0.7497047305107116
+        },
+        {
+          "proof_id": "c1908d8278164a9caa3e",
+          "doc_id": "e0cf4f4065c2",
+          "page": 7,
+          "start": 3589,
+          "end": 4984,
+          "text": "serve in computerized adaptive testing that adapts to the examinee’s level of ability. This is advantageous from the examinee’s perspective, as the diﬃculty of the exam seems to tailor itself to their level of ability.",
+          "score": 0.7614640951156616
+        }
+      ],
+      "info": {
+        "question_id": "4db0adea59eb4147",
+        "topic_label": "Comparative Evaluation of Test Difficulty",
+        "user_id": "local_user",
+        "validation_score": 1.0,
+        "card_type": "learning"
+      }
+    }
+  ],
+  "total": 5
+}
+
+GET /exams/bac118cf90a14574/session/next-card -> 200
+{
+  "card": {
+    "card_id": "66b2f2f503664392",
+    "exam_id": "bac118cf90a14574",
+    "topic_id": "47f66bc739594456",
+    "topic_label": "Comparative Evaluation of Test Difficulty",
+    "question": "What is the purpose of a computer adaptive test in evaluating test difficulty?",
+    "answer": "The purpose of a computer adaptive test is to adjust the difficulty of questions based on the examinee's ability, providing a more individualized and accurate assessment of their knowledge level.",
+    "difficulty": 1,
+    "created_at": "2026-04-21T11:21:35.879296",
+    "status": "active",
+    "proofs": [
+      {
+        "proof_id": "b37282c4e2014b77a2bf",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 0,
+        "end": 1393,
+        "text": "The solution to this problem may be the application of computer adaptive tests, which have the ability to change the level of question diﬃculty on the basis of the respondents’ abilities similar to in an oral exam. A computer adaptive test oﬀers the ability to create a test based on the respondent’s actual abilities.",
+        "score": 0.6871599793434142
+      },
+      {
+        "proof_id": "cdebebe94c564315bc60",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 1193,
+        "end": 2584,
+        "text": "There are several advantages of computer adaptive tests worth considering, when compared to traditional linear tests, such as • individualization of tests, • promoting a positive attitude toward testing, • determining the level of knowledge with greater accuracy. With the difficulty values determined properly , adaptive algorithms can then select the “right” next question in the test.",
+        "score": 0.7497047305107116
+      },
+      {
+        "proof_id": "c1908d8278164a9caa3e",
+        "doc_id": "e0cf4f4065c2",
+        "page": 7,
+        "start": 3589,
+        "end": 4984,
+        "text": "serve in computerized adaptive testing that adapts to the examinee’s level of ability. This is advantageous from the examinee’s perspective, as the diﬃculty of the exam seems to tailor itself to their level of ability.",
+        "score": 0.7614640951156616
+      }
+    ],
+    "info": {
+      "question_id": "4db0adea59eb4147",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "user_id": "local_user",
+      "validation_score": 1.0,
+      "card_type": "learning"
+    }
+  },
+  "reason": "progression",
+  "no_cards_available": false,
+  "message": null
+}
+
+POST /exams/bac118cf90a14574/cards/b16a149239844827/review -> 200
+{
+  "review_id": "641d98111a964bfcaa95",
+  "card_id": "b16a149239844827",
+  "rating": "almost_knew",
+  "due_at": null,
+  "interval_days": null,
+  "ease": null,
+  "topic_proficiency": 0.75,
+  "diagnostic_answered": 1,
+  "diagnostic_total": 4,
+  "exam_state": "diagnostic",
+  "idempotent_replay": false
+}
+
+GET /exams/bac118cf90a14574/progress -> 200
+{
+  "exam_id": "bac118cf90a14574",
+  "user_id": "local_user",
+  "topics": [
+    {
+      "topic_id": "3073079210e54813",
+      "topic_label": "Cognitive Skills in Introductory Programming",
+      "proficiency": 0.75,
+      "last_updated_at": "2026-04-21T11:21:37.307003",
+      "n_reviews": 1
+    }
+  ],
+  "overall_proficiency": 0.75
+}
+
+GET /exams/bac118cf90a14574/session/previous-card -> 200
+{
+  "card": {
+    "card_id": "66b2f2f503664392",
+    "exam_id": "bac118cf90a14574",
+    "topic_id": "47f66bc739594456",
+    "topic_label": "Comparative Evaluation of Test Difficulty",
+    "question": "What is the purpose of a computer adaptive test in evaluating test difficulty?",
+    "answer": "The purpose of a computer adaptive test is to adjust the difficulty of questions based on the examinee's ability, providing a more individualized and accurate assessment of their knowledge level.",
+    "difficulty": 1,
+    "created_at": "2026-04-21T11:21:35.879296",
+    "status": "active",
+    "proofs": [
+      {
+        "proof_id": "b37282c4e2014b77a2bf",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 0,
+        "end": 1393,
+        "text": "The solution to this problem may be the application of computer adaptive tests, which have the ability to change the level of question diﬃculty on the basis of the respondents’ abilities similar to in an oral exam. A computer adaptive test oﬀers the ability to create a test based on the respondent’s actual abilities.",
+        "score": 0.6871599793434142
+      },
+      {
+        "proof_id": "cdebebe94c564315bc60",
+        "doc_id": "e0cf4f4065c2",
+        "page": 2,
+        "start": 1193,
+        "end": 2584,
+        "text": "There are several advantages of computer adaptive tests worth considering, when compared to traditional linear tests, such as • individualization of tests, • promoting a positive attitude toward testing, • determining the level of knowledge with greater accuracy. With the difficulty values determined properly , adaptive algorithms can then select the “right” next question in the test.",
+        "score": 0.7497047305107116
+      },
+      {
+        "proof_id": "c1908d8278164a9caa3e",
+        "doc_id": "e0cf4f4065c2",
+        "page": 7,
+        "start": 3589,
+        "end": 4984,
+        "text": "serve in computerized adaptive testing that adapts to the examinee’s level of ability. This is advantageous from the examinee’s perspective, as the diﬃculty of the exam seems to tailor itself to their level of ability.",
+        "score": 0.7614640951156616
+      }
+    ],
+    "info": {
+      "question_id": "4db0adea59eb4147",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "user_id": "local_user",
+      "validation_score": 1.0,
+      "card_type": "learning"
+    }
+  },
+  "reason": "previous",
+  "no_cards_available": false,
+  "message": null
+}
+
+GET /exams/bac118cf90a14574/cards/presented-history -> 200
+{
+  "cards": [
+    {
+      "card_id": "b16a149239844827",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "3073079210e54813",
+      "topic_label": "Cognitive Skills in Introductory Programming",
+      "question": "What are the four distinct skills that novices learn incrementally when learning programming?",
+      "answer": "Novices learn the skills of tracing, writing syntax, comprehending templates, and writing code with templates incrementally when learning programming.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:20:43.535681",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "169fba8f638245908740",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 2384,
+          "end": 3779,
+          "text": "The authors used a code-tracing type of task and questions to assess students’ programming skills. It has been conﬁrmed that students cannot learn to write code without having previously learned to read/trace code as a precursory skill [6–8].",
+          "score": 0.5183143824338913
+        },
+        {
+          "proof_id": "f7738207fedb4d4e82a3",
+          "doc_id": "e0cf4f4065c2",
+          "page": 3,
+          "start": 0,
+          "end": 1397,
+          "text": "[11] proposed a theory that identiﬁed four distinct skills that novices learned incrementally. These skills were tracing, writing syntax, comprehending templates, and writing code with templates.",
+          "score": 0.5073173701763153
+        },
+        {
+          "proof_id": "5cda2a8204ec4264aa7f",
+          "doc_id": "e0cf4f4065c2",
+          "page": 20,
+          "start": 2389,
+          "end": 3780,
+          "text": "A theory of instruction for introductory programming skills. A Multi-National Study of Reading and Tracing Skills in Novice Programmers.",
+          "score": 0.4858513206243515
+        }
+      ],
+      "info": {
+        "question_id": "8784c8503d3049f1",
+        "topic_label": "Cognitive Skills in Introductory Programming",
+        "user_id": "local_user",
+        "validation_score": 1.0,
+        "card_type": "diagnostic"
+      }
+    },
+    {
+      "card_id": "66b2f2f503664392",
+      "exam_id": "bac118cf90a14574",
+      "topic_id": "47f66bc739594456",
+      "topic_label": "Comparative Evaluation of Test Difficulty",
+      "question": "What is the purpose of a computer adaptive test in evaluating test difficulty?",
+      "answer": "The purpose of a computer adaptive test is to adjust the difficulty of questions based on the examinee's ability, providing a more individualized and accurate assessment of their knowledge level.",
+      "difficulty": 1,
+      "created_at": "2026-04-21T11:21:35.879296",
+      "status": "active",
+      "proofs": [
+        {
+          "proof_id": "b37282c4e2014b77a2bf",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 0,
+          "end": 1393,
+          "text": "The solution to this problem may be the application of computer adaptive tests, which have the ability to change the level of question diﬃculty on the basis of the respondents’ abilities similar to in an oral exam. A computer adaptive test oﬀers the ability to create a test based on the respondent’s actual abilities.",
+          "score": 0.6871599793434142
+        },
+        {
+          "proof_id": "cdebebe94c564315bc60",
+          "doc_id": "e0cf4f4065c2",
+          "page": 2,
+          "start": 1193,
+          "end": 2584,
+          "text": "There are several advantages of computer adaptive tests worth considering, when compared to traditional linear tests, such as • individualization of tests, • promoting a positive attitude toward testing, • determining the level of knowledge with greater accuracy. With the difficulty values determined properly , adaptive algorithms can then select the “right” next question in the test.",
+          "score": 0.7497047305107116
+        },
+        {
+          "proof_id": "c1908d8278164a9caa3e",
+          "doc_id": "e0cf4f4065c2",
+          "page": 7,
+          "start": 3589,
+          "end": 4984,
+          "text": "serve in computerized adaptive testing that adapts to the examinee’s level of ability. This is advantageous from the examinee’s perspective, as the diﬃculty of the exam seems to tailor itself to their level of ability.",
+          "score": 0.7614640951156616
+        }
+      ],
+      "info": {
+        "question_id": "4db0adea59eb4147",
+        "topic_label": "Comparative Evaluation of Test Difficulty",
+        "user_id": "local_user",
+        "validation_score": 1.0,
+        "card_type": "learning"
+      }
+    }
+  ],
+  "total": 2
+}
+
+=== API SMOKE COMPLETED ===
+Exam ID: bac118cf90a14574
+Cards returned: 5
+Elapsed: 104.06s

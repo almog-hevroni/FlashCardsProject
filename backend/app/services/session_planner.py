@@ -37,6 +37,21 @@ class SessionPlannerService:
         now: Optional[datetime] = None,
     ) -> Optional[PlannedCard]:
         now_dt = now or datetime.now(timezone.utc)
+        exam = self.repo.get_exam(exam_id=exam_id)
+        if exam is not None and exam.state == "diagnostic":
+            diagnostic = self._build_diagnostic_queue(user_id=user_id, exam_id=exam_id)
+            chosen = self._choose_with_topic_fairness(
+                candidates=diagnostic,
+                user_id=user_id,
+                exam_id=exam_id,
+            )
+            if chosen is not None:
+                return PlannedCard(
+                    card_id=chosen.card_id,
+                    reason="diagnostic",
+                    topic_id=self._card_topic_id(chosen),
+                )
+            return None
 
         overdue = self._build_overdue_queue(user_id=user_id, exam_id=exam_id, now=now_dt)
         chosen = self._choose_with_topic_fairness(
@@ -115,6 +130,23 @@ class SessionPlannerService:
 
         # Deterministic tie-breaks: difficulty asc, created_at asc, card_id asc.
         out.sort(key=lambda c: (int(c.difficulty), c.created_at, c.card_id))
+        return out
+
+    def _build_diagnostic_queue(self, *, user_id: str, exam_id: str) -> List[StoredCard]:
+        cards = self.repo.list_cards_for_exam(exam_id=exam_id, limit=1000)
+        proficiencies = self.repo.list_topic_proficiencies(user_id=user_id, exam_id=exam_id)
+        answered_topic_ids = {p.topic_id for p in proficiencies if int(p.seen_count) > 0}
+        out: List[StoredCard] = []
+        for card in cards:
+            if card.status != "active":
+                continue
+            if card.card_type != "diagnostic":
+                continue
+            if self._card_topic_id(card) in answered_topic_ids:
+                continue
+            out.append(card)
+
+        out.sort(key=lambda c: (c.created_at, c.card_id))
         return out
 
     def _choose_with_topic_fairness(

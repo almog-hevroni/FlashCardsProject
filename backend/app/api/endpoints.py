@@ -1,6 +1,9 @@
+import os
+
 try:
     from fastapi import Body, FastAPI, File, Form, Header, Query, Request, UploadFile  # type: ignore
-    from fastapi.responses import JSONResponse  # type: ignore
+    from fastapi.middleware.cors import CORSMiddleware  # type: ignore
+    from fastapi.responses import FileResponse, JSONResponse  # type: ignore
 except Exception as exc:
     raise ImportError(
         "FastAPI is required but not installed. Install it with 'pip install fastapi uvicorn'."
@@ -38,6 +41,16 @@ from app.services.session_planner import SessionPlannerService
 from app.services.context_packs import build_diverse_chunk_pack
 
 app = FastAPI(title="DocQA Proto")
+
+_raw_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+_cors_origins = [origin.strip() for origin in _raw_cors_origins.split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _immutable_exam_error_payload(*, exam_id: Optional[str] = None, message: str) -> Dict[str, Any]:
@@ -333,6 +346,36 @@ async def presented_history_endpoint(
         if payload is not None:
             cards.append(payload)
     return CardListResponse(cards=cards, total=len(cards))
+
+
+@app.get("/documents/{doc_id}/source")
+async def document_source_endpoint(doc_id: str, exam_id: str = Query(...), user_id: str = Query(...)):
+    store = VectorStore()
+    exam = store.db.get_exam(exam_id)
+    if exam is None:
+        return JSONResponse({"error": f"Exam not found: {exam_id}"}, status_code=404)
+    if exam.user_id != user_id:
+        return JSONResponse({"error": "Exam does not belong to user"}, status_code=403)
+    exam_doc_ids = set(store.db.list_exam_documents(exam_id=exam_id))
+    if doc_id not in exam_doc_ids:
+        return JSONResponse({"error": f"Document not found in exam: {doc_id}"}, status_code=404)
+
+    doc_path = store.db.get_document_path(doc_id=doc_id)
+    if not doc_path:
+        return JSONResponse({"error": f"Document path not found: {doc_id}"}, status_code=404)
+    source_path = Path(doc_path)
+    if not source_path.exists() or not source_path.is_file():
+        return JSONResponse({"error": f"Document file is unavailable: {doc_id}"}, status_code=404)
+
+    suffix = source_path.suffix.lower()
+    media_type = "application/octet-stream"
+    if suffix == ".pdf":
+        media_type = "application/pdf"
+    elif suffix == ".txt":
+        media_type = "text/plain; charset=utf-8"
+    elif suffix == ".docx":
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return FileResponse(path=source_path, media_type=media_type, filename=source_path.name)
 
 
 @app.post("/exams/{exam_id}/cards/{card_id}/review")

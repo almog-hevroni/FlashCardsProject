@@ -233,6 +233,14 @@ class DBRepository:
             else:
                 doc = Document(doc_id=doc_id, path=path, title=title, info=info)
                 db.add(doc)
+
+    def get_document_path(self, *, doc_id: str) -> Optional[str]:
+        """Get absolute document path by document ID."""
+        with get_db() as db:
+            row = db.query(Document).filter(Document.doc_id == doc_id).first()
+            if row is None:
+                return None
+            return row.path
     
     def add_chunks(self, chunk_rows: Iterable[StoredChunk]):
         """Add or update chunks."""

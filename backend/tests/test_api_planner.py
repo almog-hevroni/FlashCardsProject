@@ -26,6 +26,16 @@ class ApiPlannerTests(unittest.TestCase):
         self.repo.ensure_user(self.user_id)
         self.exam_id = self.repo.create_exam(user_id=self.user_id, title="Phase 4 Exam")
         self.repo.update_exam_lifecycle(exam_id=self.exam_id, state="active_learning")
+        self.doc_id = "doc-source-1"
+        self.source_path = _TEST_ROOT / "source.txt"
+        self.source_path.write_text("source body", encoding="utf-8")
+        self.repo.add_document(
+            doc_id=self.doc_id,
+            path=self.source_path.as_posix(),
+            title="source.txt",
+            info={},
+        )
+        self.repo.attach_documents_to_exam(exam_id=self.exam_id, doc_ids=[self.doc_id])
 
         self.repo.upsert_topic(topic_id="t1", exam_id=self.exam_id, label="Topic 1")
         self.repo.upsert_topic(topic_id="t2", exam_id=self.exam_id, label="Topic 2")
@@ -160,6 +170,77 @@ class ApiPlannerTests(unittest.TestCase):
         self.assertIsNotNone(payload["overall_proficiency"])
         self.assertGreaterEqual(float(payload["overall_proficiency"]), 0.0)
         self.assertLessEqual(float(payload["overall_proficiency"]), 1.0)
+
+    def test_document_source_endpoint_returns_exam_document(self) -> None:
+        res = self.client.get(
+            f"/documents/{self.doc_id}/source",
+            params={"exam_id": self.exam_id, "user_id": self.user_id},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("text/plain", (res.headers.get("content-type") or ""))
+        self.assertIn("source body", res.text)
+
+    def test_diagnostic_exam_serves_unanswered_diagnostic_cards(self) -> None:
+        self.repo.update_exam_lifecycle(exam_id=self.exam_id, state="diagnostic")
+        self.repo.upsert_card(
+            card_id="d1",
+            exam_id=self.exam_id,
+            topic_id="t1",
+            question="Diagnostic Q1?",
+            answer="Diagnostic A1",
+            difficulty=1,
+            card_type="diagnostic",
+            status="active",
+            info={},
+        )
+        self.repo.replace_card_topics(
+            card_id="d1",
+            topics=[{"topic_id": "t1", "role": "primary", "weight": 1.0}],
+        )
+        self.repo.upsert_card(
+            card_id="d2",
+            exam_id=self.exam_id,
+            topic_id="t2",
+            question="Diagnostic Q2?",
+            answer="Diagnostic A2",
+            difficulty=1,
+            card_type="diagnostic",
+            status="active",
+            info={},
+        )
+        self.repo.replace_card_topics(
+            card_id="d2",
+            topics=[{"topic_id": "t2", "role": "primary", "weight": 1.0}],
+        )
+
+        first = self.client.get(
+            f"/exams/{self.exam_id}/session/next-card",
+            params={"user_id": self.user_id},
+        )
+        self.assertEqual(first.status_code, 200)
+        first_payload = first.json()
+        self.assertFalse(first_payload["no_cards_available"])
+        self.assertEqual(first_payload["reason"], "diagnostic")
+        self.assertIn(first_payload["card"]["card_id"], {"d1", "d2"})
+
+        first_card_id = first_payload["card"]["card_id"]
+        first_review = self.client.post(
+            f"/exams/{self.exam_id}/cards/{first_card_id}/review",
+            data={"user_id": self.user_id, "rating": "almost_knew"},
+            headers={"Idempotency-Key": "phase4-diagnostic-first"},
+        )
+        self.assertEqual(first_review.status_code, 200)
+        self.assertEqual(first_review.json()["exam_state"], "diagnostic")
+
+        second = self.client.get(
+            f"/exams/{self.exam_id}/session/next-card",
+            params={"user_id": self.user_id},
+        )
+        self.assertEqual(second.status_code, 200)
+        second_payload = second.json()
+        self.assertFalse(second_payload["no_cards_available"])
+        self.assertEqual(second_payload["reason"], "diagnostic")
+        self.assertNotEqual(second_payload["card"]["card_id"], first_card_id)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,189 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { UploadExamForm } from "@/components/home/upload-exam-form";
+
+const pushMock = vi.fn();
+const createExamFromUploadMock = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: pushMock,
+  }),
+}));
+
+vi.mock("@/lib/api/client", () => ({
+  createExamFromUpload: (...args: unknown[]) => createExamFromUploadMock(...args),
+}));
+
+vi.mock("@/lib/session/guest-session", () => ({
+  useGuestSession: () => ({ userId: "guest", mode: "guest" }),
+}));
+
+function renderWithQueryClient() {
+  const queryClient = new QueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <UploadExamForm />
+    </QueryClientProvider>,
+  );
+}
+
+describe("UploadExamForm", () => {
+  beforeEach(() => {
+    createExamFromUploadMock.mockReset();
+    pushMock.mockReset();
+  });
+
+  it("renders the upload hero content and supported file types", () => {
+    renderWithQueryClient();
+
+    expect(screen.getByRole("heading", { name: "FlashCards" })).toBeInTheDocument();
+    expect(screen.getByText(/Start here - upload your study files/i)).toBeInTheDocument();
+    expect(screen.getByText("Step 1 - Drop your study files")).toBeInTheDocument();
+    expect(screen.getByText("Step 2 - Give your exam a name")).toBeInTheDocument();
+    expect(screen.getByText("Step 3 - Create the magic")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create the magic" })).toBeInTheDocument();
+    expect(screen.getByText("PDF")).toBeInTheDocument();
+    expect(screen.getByText("DOCX")).toBeInTheDocument();
+    expect(screen.getByText("TXT")).toBeInTheDocument();
+    expect(screen.getByText(/Supported file types: \.pdf, \.docx, \.txt/)).toBeInTheDocument();
+  });
+
+  it("uploads selected files and redirects to exam page", async () => {
+    createExamFromUploadMock.mockResolvedValue({
+      exam_id: "exam-123",
+      state: "diagnostic",
+      diagnostic_total: 0,
+      diagnostic_answered: 0,
+      cards_generated: 0,
+      topic_count: 0,
+    });
+
+    const { container } = renderWithQueryClient();
+    const fileInput = container.querySelector('input[type="file"]');
+    if (!fileInput) {
+      throw new Error("Missing file input");
+    }
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["hello"], "notes.txt", { type: "text/plain" })],
+      },
+    });
+
+    fireEvent.change(screen.getByLabelText("Exam title"), {
+      target: { value: "Networks exam" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create the magic" }));
+
+    await waitFor(() => {
+      expect(createExamFromUploadMock).toHaveBeenCalledTimes(1);
+      expect(pushMock).toHaveBeenCalledWith("/exams/exam-123");
+    });
+  });
+
+  it("keeps previously selected files when adding more", async () => {
+    const { container } = renderWithQueryClient();
+    const fileInput = container.querySelector('input[type="file"]');
+    if (!fileInput) {
+      throw new Error("Missing file input");
+    }
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["one"], "first.pdf", { type: "application/pdf" })],
+      },
+    });
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["two"], "second.txt", { type: "text/plain" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("first.pdf")).toBeInTheDocument();
+      expect(screen.getByText("second.txt")).toBeInTheDocument();
+      expect(screen.getByText("2 files selected")).toBeInTheDocument();
+    });
+  });
+
+  it("adds dropped files to the existing list", async () => {
+    const { container } = renderWithQueryClient();
+    const uploadCard = container.querySelector(".home-upload-flow");
+    if (!uploadCard) {
+      throw new Error("Missing upload card");
+    }
+
+    fireEvent.drop(uploadCard, {
+      dataTransfer: {
+        files: [new File(["first"], "a.pdf", { type: "application/pdf" })],
+      },
+    });
+    fireEvent.drop(uploadCard, {
+      dataTransfer: {
+        files: [new File(["second"], "b.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("a.pdf")).toBeInTheDocument();
+      expect(screen.getByText("b.docx")).toBeInTheDocument();
+      expect(screen.getByText("2 files selected")).toBeInTheDocument();
+    });
+  });
+
+  it("keeps create button disabled until files and title are provided", async () => {
+    const { container } = renderWithQueryClient();
+    const fileInput = container.querySelector('input[type="file"]');
+    if (!fileInput) {
+      throw new Error("Missing upload input");
+    }
+
+    const createMagicButton = screen.getByRole("button", { name: "Create the magic" });
+    expect(createMagicButton).toBeDisabled();
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["content"], "ready.pdf", { type: "application/pdf" })],
+      },
+    });
+    expect(createMagicButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Exam title"), {
+      target: { value: "Ready exam title" },
+    });
+    expect(createMagicButton).not.toBeDisabled();
+  });
+
+  it("shows a friendly message for 422 upload errors", async () => {
+    createExamFromUploadMock.mockRejectedValue(
+      Object.assign(
+        new Error(
+          'API request failed (422): {"error":"diagnostic_bootstrap_failed","message":"Only 2 diagnostic cards were created for 3 topics; at least 3 are required."}',
+        ),
+        { status: 422 },
+      ),
+    );
+
+    const { container } = renderWithQueryClient();
+    const fileInput = container.querySelector('input[type="file"]');
+    if (!fileInput) {
+      throw new Error("Missing file input");
+    }
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [new File(["hello"], "notes.txt", { type: "text/plain" })],
+      },
+    });
+    fireEvent.change(screen.getByLabelText("Exam title"), {
+      target: { value: "Networks exam" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create the magic" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Please review your files and title, then try again.")).toBeInTheDocument();
+    });
+  });
+});
