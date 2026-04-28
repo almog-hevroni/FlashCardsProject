@@ -383,6 +383,77 @@ class ApiPlannerTests(unittest.TestCase):
         assert served_card is not None
         self.assertEqual(served_card.info.get("prefetch_status"), "served")
 
+    def test_ready_prefetch_that_was_already_presented_is_not_served_again(self) -> None:
+        self._archive_seed_learning_cards()
+        self._seed_prefetched_card(card_id="prefetch-presented", topic_id="t1", generated_difficulty=1)
+        now = datetime.now(timezone.utc)
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="prefetch-presented",
+            presented_at=now,
+            info={"source": "test"},
+        )
+
+        def fake_generate(service, *, user_id: str, exam_id: str, store):
+            service.repo.upsert_card(
+                card_id="generated-after-presented-prefetch",
+                exam_id=exam_id,
+                topic_id="t2",
+                question="Generated after presented prefetch?",
+                answer="Generated answer",
+                difficulty=1,
+                card_type="learning",
+                status="active",
+                info={"card_type": "learning"},
+            )
+            service.repo.replace_card_topics(
+                card_id="generated-after-presented-prefetch",
+                topics=[{"topic_id": "t2", "role": "primary", "weight": 1.0}],
+            )
+            return GeneratedSessionCard(
+                card_id="generated-after-presented-prefetch",
+                reason="generated",
+                topic_id="t2",
+            )
+
+        with patch("app.api.endpoints.SessionCardGenerationService.generate_next_card", new=fake_generate):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["reason"], "generated")
+        self.assertEqual(payload["card"]["card_id"], "generated-after-presented-prefetch")
+        presented_prefetch = self.repo.get_card(card_id="prefetch-presented")
+        self.assertIsNotNone(presented_prefetch)
+        assert presented_prefetch is not None
+        self.assertEqual(presented_prefetch.info.get("prefetch_status"), "served")
+
+    def test_prefetch_refill_does_not_mark_already_presented_card_ready(self) -> None:
+        service = SessionCardGenerationService(repo=self.repo)
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c2",
+            presented_at=datetime.now(timezone.utc),
+            info={"source": "test"},
+        )
+
+        service._mark_prefetched_card_ready(
+            card_id="c2",
+            user_id=self.user_id,
+            choice=service.select_next_topic(user_id=self.user_id, exam_id=self.exam_id),
+        )
+
+        card = self.repo.get_card(card_id="c2")
+        self.assertIsNotNone(card)
+        assert card is not None
+        self.assertEqual(card.info.get("prefetch_status"), "served")
+        self.assertEqual(card.info.get("prefetch_skipped_reason"), "already_presented")
+
     def test_stale_prefetched_card_is_skipped_for_sync_generation(self) -> None:
         self._archive_seed_learning_cards()
         self._seed_prefetched_card(card_id="prefetch-stale", topic_id="t1", generated_difficulty=1)
@@ -541,6 +612,28 @@ class ApiPlannerTests(unittest.TestCase):
         self.assertIsNotNone(choice)
         assert choice is not None
         self.assertEqual(choice.topic_id, "t2")
+
+    def test_generation_keeps_blocked_topic_as_last_resort_choice(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now - timedelta(minutes=2),
+            info={"source": "test"},
+        )
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now - timedelta(minutes=1),
+            info={"source": "test"},
+        )
+
+        service = SessionCardGenerationService(repo=self.repo, max_consecutive_topic_cards=2)
+        choices = service._ordered_topic_choices(user_id=self.user_id, exam_id=self.exam_id)
+
+        self.assertEqual([choice.topic_id for choice in choices], ["t2", "t1"])
 
 
 if __name__ == "__main__":

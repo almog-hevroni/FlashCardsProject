@@ -170,6 +170,9 @@ class SessionCardGenerationService:
         for card in cards:
             if not self._is_ready_prefetch(card=card, user_id=user_id):
                 continue
+            if self._has_card_been_presented(user_id=user_id, exam_id=exam_id, card_id=card.card_id):
+                self.mark_prefetched_card_served(card_id=card.card_id, user_id=user_id)
+                continue
             if self._is_prefetch_fresh(card=card, user_id=user_id, exam_id=exam_id):
                 candidates.append(card)
             else:
@@ -215,7 +218,8 @@ class SessionCardGenerationService:
             _ACTIVE_REFILLS.add(key)
 
         try:
-            if self._ready_prefetch_count(user_id=user_id, exam_id=exam_id) >= self.max_ready_prefetch_per_exam:
+            ready_before = self._ready_prefetch_count(user_id=user_id, exam_id=exam_id)
+            if ready_before >= self.max_ready_prefetch_per_exam:
                 return
             generated = self.generate_next_card(user_id=user_id, exam_id=exam_id, prefetch=True)
             if generated is None:
@@ -252,9 +256,10 @@ class SessionCardGenerationService:
                 t.topic_id,
             ),
         )
-        unblocked = [t for t in ordered_topics if t.topic_id != blocked_topic]
-        if unblocked:
-            ordered_topics = unblocked
+        if blocked_topic is not None:
+            unblocked = [t for t in ordered_topics if t.topic_id != blocked_topic]
+            blocked = [t for t in ordered_topics if t.topic_id == blocked_topic]
+            ordered_topics = unblocked + blocked
 
         choices: List[TopicGenerationChoice] = []
         for topic in ordered_topics:
@@ -294,6 +299,23 @@ class SessionCardGenerationService:
     ) -> None:
         card = self.repo.get_card(card_id=card_id)
         if card is None:
+            return
+        if self._has_card_been_presented(user_id=user_id, exam_id=card.exam_id, card_id=card.card_id):
+            info = dict(card.info or {})
+            info["prefetch_status"] = PREFETCH_STATUS_SERVED
+            info["prefetch_served_at"] = datetime.now(timezone.utc).isoformat()
+            info["prefetch_skipped_reason"] = "already_presented"
+            self.repo.upsert_card(
+                card_id=card.card_id,
+                exam_id=card.exam_id,
+                topic_id=card.topic_id,
+                question=card.question,
+                answer=card.answer,
+                difficulty=card.difficulty,
+                card_type=card.card_type,
+                status=card.status,
+                info=info,
+            )
             return
         prof = self.repo.get_topic_proficiency(
             user_id=user_id,
@@ -446,3 +468,14 @@ class SessionCardGenerationService:
         if len(primaries) == 1:
             return primaries[0].topic_id
         return card.topic_id
+
+    def _has_card_been_presented(self, *, user_id: str, exam_id: str, card_id: str) -> bool:
+        return any(
+            presentation.card_id == card_id
+            for presentation in self.repo.list_presentations(
+                user_id=user_id,
+                exam_id=exam_id,
+                ascending=False,
+                limit=5000,
+            )
+        )
