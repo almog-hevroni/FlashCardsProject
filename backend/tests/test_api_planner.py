@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -14,6 +15,7 @@ os.environ["VECTOR_BACKEND"] = "numpy"
 from app.api.endpoints import app
 from app.data.db_engine import drop_all_tables, init_db
 from app.data.db_repository import DBRepository
+from app.services.session_card_generation import GeneratedSessionCard, SessionCardGenerationService
 
 
 class ApiPlannerTests(unittest.TestCase):
@@ -22,6 +24,12 @@ class ApiPlannerTests(unittest.TestCase):
         init_db()
         self.client = TestClient(app)
         self.repo = DBRepository(_TEST_ROOT / "meta.sqlite")
+        self.refill_patcher = patch(
+            "app.api.endpoints.SessionCardGenerationService.refill_prefetch_if_needed",
+            autospec=True,
+        )
+        self.mock_refill = self.refill_patcher.start()
+        self.addCleanup(self.refill_patcher.stop)
         self.user_id = "phase4-user"
         self.repo.ensure_user(self.user_id)
         self.exam_id = self.repo.create_exam(user_id=self.user_id, title="Phase 4 Exam")
@@ -91,11 +99,59 @@ class ApiPlannerTests(unittest.TestCase):
             last_reviewed_at=now - timedelta(days=1),
         )
 
-    def test_next_previous_and_presented_history(self) -> None:
-        n1 = self.client.get(
-            f"/exams/{self.exam_id}/session/next-card",
-            params={"user_id": self.user_id},
+    def _archive_seed_learning_cards(self) -> None:
+        for card_id, topic_id, question, answer in [
+            ("c1", "t1", "Q1?", "A1"),
+            ("c2", "t2", "Q2?", "A2"),
+        ]:
+            self.repo.upsert_card(
+                card_id=card_id,
+                exam_id=self.exam_id,
+                topic_id=topic_id,
+                question=question,
+                answer=answer,
+                difficulty=1,
+                card_type="learning",
+                status="archived",
+                info={},
+            )
+
+    def _seed_prefetched_card(
+        self,
+        *,
+        card_id: str,
+        topic_id: str,
+        generated_difficulty: int,
+    ) -> None:
+        self.repo.upsert_card(
+            card_id=card_id,
+            exam_id=self.exam_id,
+            topic_id=topic_id,
+            question=f"Prefetched {card_id}?",
+            answer=f"Prefetched {card_id} answer",
+            difficulty=generated_difficulty,
+            card_type="learning",
+            status="active",
+            info={
+                "prefetch_status": "ready",
+                "generated_for_user_id": self.user_id,
+                "generated_difficulty": generated_difficulty,
+            },
         )
+        self.repo.replace_card_topics(
+            card_id=card_id,
+            topics=[{"topic_id": topic_id, "role": "primary", "weight": 1.0}],
+        )
+
+    def test_next_previous_and_presented_history(self) -> None:
+        with patch(
+            "app.api.endpoints.SessionCardGenerationService.generate_next_card",
+            side_effect=AssertionError("due SRS card should be served before generation"),
+        ):
+            n1 = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
         self.assertEqual(n1.status_code, 200)
         p1 = n1.json()
         self.assertFalse(p1["no_cards_available"])
@@ -241,6 +297,250 @@ class ApiPlannerTests(unittest.TestCase):
         self.assertFalse(second_payload["no_cards_available"])
         self.assertEqual(second_payload["reason"], "diagnostic")
         self.assertNotEqual(second_payload["card"]["card_id"], first_card_id)
+
+    def test_diagnostic_exhaustion_falls_through_to_active_learning(self) -> None:
+        self.repo.update_exam_lifecycle(
+            exam_id=self.exam_id,
+            state="diagnostic",
+            diagnostic_total=2,
+            diagnostic_answered=1,
+        )
+
+        result = self.client.get(
+            f"/exams/{self.exam_id}/session/next-card",
+            params={"user_id": self.user_id},
+        )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertFalse(payload["no_cards_available"])
+        self.assertEqual(payload["reason"], "overdue")
+        self.assertEqual(payload["card"]["card_id"], "c1")
+        exam = self.repo.get_exam(self.exam_id)
+        self.assertIsNotNone(exam)
+        assert exam is not None
+        self.assertEqual(exam.state, "active_learning")
+
+    def test_next_card_generates_learning_card_when_planner_has_no_candidate(self) -> None:
+        self._archive_seed_learning_cards()
+
+        def fake_generate(service, *, user_id: str, exam_id: str, store):
+            self.assertEqual(user_id, self.user_id)
+            self.assertEqual(exam_id, self.exam_id)
+            service.repo.upsert_card(
+                card_id="generated-1",
+                exam_id=exam_id,
+                topic_id="t2",
+                question="Generated?",
+                answer="Generated answer",
+                difficulty=1,
+                card_type="learning",
+                status="active",
+                info={"card_type": "learning"},
+            )
+            service.repo.replace_card_topics(
+                card_id="generated-1",
+                topics=[{"topic_id": "t2", "role": "primary", "weight": 1.0}],
+            )
+            return GeneratedSessionCard(card_id="generated-1", reason="generated", topic_id="t2")
+
+        with patch("app.api.endpoints.SessionCardGenerationService.generate_next_card", new=fake_generate):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertFalse(payload["no_cards_available"])
+        self.assertEqual(payload["reason"], "generated")
+        self.assertEqual(payload["card"]["card_id"], "generated-1")
+        latest = self.repo.get_latest_presentation(user_id=self.user_id, exam_id=self.exam_id)
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(latest.card_id, "generated-1")
+
+    def test_fresh_prefetched_card_is_served_before_sync_generation(self) -> None:
+        self._archive_seed_learning_cards()
+        self._seed_prefetched_card(card_id="prefetch-1", topic_id="t1", generated_difficulty=1)
+
+        with patch(
+            "app.api.endpoints.SessionCardGenerationService.generate_next_card",
+            side_effect=AssertionError("fresh prefetch should be served before sync generation"),
+        ):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertFalse(payload["no_cards_available"])
+        self.assertEqual(payload["reason"], "prefetched")
+        self.assertEqual(payload["card"]["card_id"], "prefetch-1")
+        served_card = self.repo.get_card(card_id="prefetch-1")
+        self.assertIsNotNone(served_card)
+        assert served_card is not None
+        self.assertEqual(served_card.info.get("prefetch_status"), "served")
+
+    def test_stale_prefetched_card_is_skipped_for_sync_generation(self) -> None:
+        self._archive_seed_learning_cards()
+        self._seed_prefetched_card(card_id="prefetch-stale", topic_id="t1", generated_difficulty=1)
+        self.repo.upsert_topic_proficiency(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            topic_id="t1",
+            proficiency=0.9,
+            current_difficulty=4,
+            streak_up=0,
+            streak_down=0,
+            seen_count=1,
+            correctish_count=1,
+            info={},
+        )
+
+        def fake_generate(service, *, user_id: str, exam_id: str, store):
+            service.repo.upsert_card(
+                card_id="generated-after-stale",
+                exam_id=exam_id,
+                topic_id="t2",
+                question="Generated after stale?",
+                answer="Generated answer",
+                difficulty=1,
+                card_type="learning",
+                status="active",
+                info={"card_type": "learning"},
+            )
+            service.repo.replace_card_topics(
+                card_id="generated-after-stale",
+                topics=[{"topic_id": "t2", "role": "primary", "weight": 1.0}],
+            )
+            return GeneratedSessionCard(card_id="generated-after-stale", reason="generated", topic_id="t2")
+
+        with patch("app.api.endpoints.SessionCardGenerationService.generate_next_card", new=fake_generate):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["reason"], "generated")
+        self.assertEqual(payload["card"]["card_id"], "generated-after-stale")
+        stale = self.repo.get_card(card_id="prefetch-stale")
+        self.assertIsNotNone(stale)
+        assert stale is not None
+        self.assertEqual(stale.status, "archived")
+        self.assertEqual(stale.info.get("prefetch_status"), "stale")
+
+    def test_due_srs_card_beats_ready_prefetched_card(self) -> None:
+        self._seed_prefetched_card(card_id="prefetch-1", topic_id="t2", generated_difficulty=1)
+
+        with patch(
+            "app.api.endpoints.SessionCardGenerationService.generate_next_card",
+            side_effect=AssertionError("due SRS card should be served before generation"),
+        ):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["reason"], "overdue")
+        self.assertEqual(payload["card"]["card_id"], "c1")
+
+    def test_retired_due_card_is_not_served_as_overdue(self) -> None:
+        self._archive_seed_learning_cards()
+        now = datetime.now(timezone.utc)
+        self.repo.upsert_card(
+            card_id="retired-due",
+            exam_id=self.exam_id,
+            topic_id="t1",
+            question="Retired?",
+            answer="Retired answer",
+            difficulty=1,
+            card_type="learning",
+            status="active",
+            info={},
+        )
+        self.repo.replace_card_topics(
+            card_id="retired-due",
+            topics=[{"topic_id": "t1", "role": "primary", "weight": 1.0}],
+        )
+        self.repo.upsert_card_scheduling(
+            card_id="retired-due",
+            due_at=now,
+            state="retired",
+            interval_days=7.0,
+            ease=2.7,
+            reps=1,
+            lapses=0,
+            last_reviewed_at=now,
+        )
+
+        def fake_generate(service, *, user_id: str, exam_id: str, store):
+            service.repo.upsert_card(
+                card_id="generated-after-retired",
+                exam_id=exam_id,
+                topic_id="t2",
+                question="Generated after retired?",
+                answer="Generated answer",
+                difficulty=1,
+                card_type="learning",
+                status="active",
+                info={"card_type": "learning"},
+            )
+            service.repo.replace_card_topics(
+                card_id="generated-after-retired",
+                topics=[{"topic_id": "t2", "role": "primary", "weight": 1.0}],
+            )
+            return GeneratedSessionCard(card_id="generated-after-retired", reason="generated", topic_id="t2")
+
+        with patch("app.api.endpoints.SessionCardGenerationService.generate_next_card", new=fake_generate):
+            result = self.client.get(
+                f"/exams/{self.exam_id}/session/next-card",
+                params={"user_id": self.user_id},
+            )
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["reason"], "generated")
+        self.assertEqual(payload["card"]["card_id"], "generated-after-retired")
+
+    def test_background_refill_requested_after_review(self) -> None:
+        res = self.client.post(
+            f"/exams/{self.exam_id}/cards/c1/review",
+            data={"user_id": self.user_id, "rating": "learned_now"},
+            headers={"Idempotency-Key": "phase4-refill-review"},
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(self.mock_refill.called)
+
+    def test_generation_topic_selection_balances_recent_topic_counts(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now - timedelta(minutes=2),
+            info={"source": "test"},
+        )
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now - timedelta(minutes=1),
+            info={"source": "test"},
+        )
+
+        service = SessionCardGenerationService(repo=self.repo, max_consecutive_topic_cards=2)
+        choice = service.select_next_topic(user_id=self.user_id, exam_id=self.exam_id)
+
+        self.assertIsNotNone(choice)
+        assert choice is not None
+        self.assertEqual(choice.topic_id, "t2")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled={false}
         statusMessage={null}
         onToggleAnswer={() => {}}
@@ -55,6 +56,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled={false}
         statusMessage={null}
         onToggleAnswer={() => {}}
@@ -83,6 +85,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled={false}
         statusMessage={null}
         onToggleAnswer={onToggleAnswer}
@@ -107,6 +110,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard={false}
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled
         statusMessage={null}
         onToggleAnswer={() => {}}
@@ -130,6 +134,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled={false}
         statusMessage={null}
         onToggleAnswer={() => {}}
@@ -153,6 +158,7 @@ describe("FlashcardPlayer", () => {
         canRateCurrentCard
         selectedRating={null}
         isRatingPending={false}
+        isPreparingNextCard={false}
         isNextEnabled={false}
         statusMessage={null}
         onToggleAnswer={() => {}}
@@ -165,5 +171,29 @@ describe("FlashcardPlayer", () => {
     );
 
     expect(screen.getByText("Getting to know you ✨")).toBeInTheDocument();
+  });
+
+  it("shows next-card preparation feedback while pending", () => {
+    render(
+      <FlashcardPlayer
+        card={buildCard()}
+        isAnswerVisible={false}
+        canRateCurrentCard
+        selectedRating="i_knew_it"
+        isRatingPending={false}
+        isPreparingNextCard
+        isNextEnabled
+        statusMessage={null}
+        onToggleAnswer={() => {}}
+        onShowProofs={() => {}}
+        onRate={() => {}}
+        onLoadPrevious={() => {}}
+        onLoadNext={() => {}}
+        isPreviousEnabled
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Preparing next card..." })).toBeDisabled();
+    expect(screen.getByText(/Preparing a new card for your current level/i)).toBeInTheDocument();
   });
 });

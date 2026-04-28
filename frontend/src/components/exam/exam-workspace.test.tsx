@@ -63,6 +63,14 @@ function renderWorkspace() {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
 describe("ExamWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -150,5 +158,55 @@ describe("ExamWorkspace", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
     await screen.findByText("Question 2");
     expect(getSessionNextCardMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps current card visible while preparing the next card", async () => {
+    getExamByIdMock.mockResolvedValue({
+      exam_id: "exam-1",
+      user_id: "guest",
+      title: "Test Exam",
+      mode: "mastery",
+      state: "active_learning",
+      diagnostic_total: 0,
+      diagnostic_answered: 0,
+      diagnostic_started_at: null,
+      diagnostic_completed_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      info: {},
+    });
+    const pendingNext = deferred<ReturnType<typeof nextCardResponse>>();
+    getSessionNextCardMock
+      .mockResolvedValueOnce(nextCardResponse(buildCard("c1", "Question 1")))
+      .mockReturnValueOnce(pendingNext.promise);
+    submitCardReviewMock.mockResolvedValue({
+      review_id: "review-c1",
+      card_id: "c1",
+      rating: "i_knew_it",
+      due_at: null,
+      interval_days: 1,
+      ease: 2.5,
+      topic_proficiency: 0.5,
+      diagnostic_answered: 0,
+      diagnostic_total: 0,
+      exam_state: "active_learning",
+      idempotent_replay: false,
+    });
+    logSessionEventMock.mockResolvedValue({ event_id: "evt-1" });
+
+    renderWorkspace();
+
+    await screen.findByText("Question 1");
+    fireEvent.click(screen.getByRole("button", { name: /I knew it/i }));
+    await waitFor(() => expect(submitCardReviewMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+
+    expect(screen.getByText("Question 1")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Preparing next card..." })).toBeDisabled();
+    expect(screen.getByText(/Preparing a new card for your current level/i)).toBeInTheDocument();
+
+    pendingNext.resolve(nextCardResponse(buildCard("c2", "Question 2")));
+    await screen.findByText("Question 2");
   });
 });

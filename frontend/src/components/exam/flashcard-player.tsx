@@ -13,6 +13,7 @@ type FlashcardPlayerProps = {
   canRateCurrentCard: boolean;
   selectedRating: ReviewRating | null;
   isRatingPending: boolean;
+  isPreparingNextCard: boolean;
   isNextEnabled: boolean;
   statusMessage: string | null;
   onToggleAnswer: () => void;
@@ -29,6 +30,7 @@ export function FlashcardPlayer({
   canRateCurrentCard,
   selectedRating,
   isRatingPending,
+  isPreparingNextCard,
   isNextEnabled,
   statusMessage,
   onToggleAnswer,
@@ -61,8 +63,9 @@ export function FlashcardPlayer({
             className="flashcard-player__nav-button flashcard-player__nav-button--primary"
             type="button"
             onClick={onLoadNext}
+            disabled={isPreparingNextCard}
           >
-            Next
+            {isPreparingNextCard ? "Preparing next card..." : "Next"}
           </button>
         </div>
       </section>
@@ -200,6 +203,11 @@ export function FlashcardPlayer({
       {statusMessage ? (
         <p className="flashcard-player__hint">{statusMessage}</p>
       ) : null}
+      {isPreparingNextCard ? (
+        <p className="flashcard-player__hint" aria-live="polite">
+          Preparing a new card for your current level. This can take a moment.
+        </p>
+      ) : null}
 
       <footer className="flashcard-player__nav">
         <button
@@ -214,9 +222,9 @@ export function FlashcardPlayer({
           className="flashcard-player__nav-button flashcard-player__nav-button--primary"
           type="button"
           onClick={onLoadNext}
-          disabled={!isNextEnabled || isRatingPending}
+          disabled={!isNextEnabled || isRatingPending || isPreparingNextCard}
         >
-          Next
+          {isPreparingNextCard ? "Preparing next card..." : "Next"}
         </button>
       </footer>
     </section>

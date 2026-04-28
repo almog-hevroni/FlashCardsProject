@@ -51,7 +51,11 @@ class SessionPlannerService:
                     reason="diagnostic",
                     topic_id=self._card_topic_id(chosen),
                 )
-            return None
+            self.repo.update_exam_lifecycle(
+                exam_id=exam_id,
+                state="active_learning",
+                diagnostic_completed_at=now_dt,
+            )
 
         overdue = self._build_overdue_queue(user_id=user_id, exam_id=exam_id, now=now_dt)
         chosen = self._choose_with_topic_fairness(
@@ -62,7 +66,7 @@ class SessionPlannerService:
         if chosen is not None:
             return PlannedCard(card_id=chosen.card_id, reason="overdue", topic_id=self._card_topic_id(chosen))
 
-        remediation = self._build_remediation_queue(exam_id=exam_id)
+        remediation = self._build_remediation_queue(exam_id=exam_id, now=now_dt)
         chosen = self._choose_with_topic_fairness(
             candidates=remediation,
             user_id=user_id,
@@ -71,7 +75,7 @@ class SessionPlannerService:
         if chosen is not None:
             return PlannedCard(card_id=chosen.card_id, reason="remediation", topic_id=self._card_topic_id(chosen))
 
-        progression = self._build_progression_queue(exam_id=exam_id)
+        progression = self._build_progression_queue(exam_id=exam_id, now=now_dt)
         chosen = self._choose_with_topic_fairness(
             candidates=progression,
             user_id=user_id,
@@ -93,13 +97,15 @@ class SessionPlannerService:
         )
         cards: List[StoredCard] = []
         for s in due:
+            if s.state not in {"new", "learning", "review"}:
+                continue
             card = self.repo.get_card(card_id=s.card_id)
             if card is None or card.status != "active":
                 continue
             cards.append(card)
         return cards
 
-    def _build_remediation_queue(self, *, exam_id: str) -> List[StoredCard]:
+    def _build_remediation_queue(self, *, exam_id: str, now: datetime) -> List[StoredCard]:
         rows = self.repo.list_card_scheduling_by_state(
             exam_id=exam_id,
             state="relearning",
@@ -107,13 +113,15 @@ class SessionPlannerService:
         )
         cards: List[StoredCard] = []
         for s in rows:
+            if not self._is_due(s.due_at, now):
+                continue
             card = self.repo.get_card(card_id=s.card_id)
             if card is None or card.status != "active":
                 continue
             cards.append(card)
         return cards
 
-    def _build_progression_queue(self, *, exam_id: str) -> List[StoredCard]:
+    def _build_progression_queue(self, *, exam_id: str, now: datetime) -> List[StoredCard]:
         cards = self.repo.list_cards_for_exam(exam_id=exam_id, limit=1000)
         out: List[StoredCard] = []
         for card in cards:
@@ -121,11 +129,13 @@ class SessionPlannerService:
                 continue
             if card.card_type == "diagnostic":
                 continue
+            if (card.info or {}).get("prefetch_status") == "ready":
+                continue
             sched = self.repo.get_card_scheduling(card_id=card.card_id)
             if sched is None:
                 out.append(card)
                 continue
-            if sched.state in {"new", "learning", "review"}:
+            if sched.state in {"new", "learning", "review"} and self._is_due(sched.due_at, now):
                 out.append(card)
 
         # Deterministic tie-breaks: difficulty asc, created_at asc, card_id asc.
@@ -222,3 +232,14 @@ class SessionPlannerService:
         if len(primaries) == 1:
             return primaries[0].topic_id
         return card.topic_id
+
+    def _is_due(self, due_at: str, now: datetime) -> bool:
+        if not due_at:
+            return True
+        try:
+            due_dt = datetime.fromisoformat(due_at)
+        except ValueError:
+            return True
+        if due_dt.tzinfo is None:
+            due_dt = due_dt.replace(tzinfo=timezone.utc)
+        return due_dt <= now

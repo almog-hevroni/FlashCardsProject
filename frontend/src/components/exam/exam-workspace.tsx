@@ -188,6 +188,7 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
   }, [handleNext, handlePrevious]);
 
   const isLoading = sessionQuery.isLoading || nextCardMutation.isPending;
+  const isPreparingNextCard = nextCardMutation.isPending;
   const sessionLoadError = sessionQuery.isError
     ? mapApiError(sessionQuery.error, "exam.workspace.load_session")
     : null;
@@ -238,6 +239,7 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
             canRateCurrentCard={canRateCurrentCard}
             selectedRating={currentCardRating}
             isRatingPending={reviewMutation.isPending || isLoading}
+            isPreparingNextCard={isPreparingNextCard}
             isNextEnabled={isNextEnabled}
             statusMessage={currentMessage}
             onToggleAnswer={handleToggleAnswer}

@@ -1,7 +1,7 @@
 import os
 
 try:
-    from fastapi import Body, FastAPI, File, Form, Header, Query, Request, UploadFile  # type: ignore
+    from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, Query, Request, UploadFile  # type: ignore
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore
     from fastapi.responses import FileResponse, JSONResponse  # type: ignore
 except Exception as exc:
@@ -37,6 +37,7 @@ from app.services.exams import ImmutableExamError
 from app.services.graph import generate_single_card
 from app.services.ingestion import UnsupportedDocumentTypeError
 from app.services.review_service import ReviewService
+from app.services.session_card_generation import SessionCardGenerationService
 from app.services.session_planner import SessionPlannerService
 from app.services.context_packs import build_diverse_chunk_pack
 
@@ -284,7 +285,11 @@ async def list_cards_endpoint(
 
 
 @app.get("/exams/{exam_id}/session/next-card", response_model=NextCardResponse)
-async def next_card_endpoint(exam_id: str, user_id: str = Query(...)):
+async def next_card_endpoint(
+    exam_id: str,
+    background_tasks: BackgroundTasks,
+    user_id: str = Query(...),
+):
     store = VectorStore()
     exam = store.db.get_exam(exam_id)
     if exam is None:
@@ -293,9 +298,16 @@ async def next_card_endpoint(exam_id: str, user_id: str = Query(...)):
         return JSONResponse({"error": "Exam does not belong to user"}, status_code=403)
 
     planner = SessionPlannerService(repo=store.db)
+    generator = SessionCardGenerationService(repo=store.db)
     planned = planner.plan_next_card(user_id=user_id, exam_id=exam_id)
     if planned is None:
+        planned = generator.get_fresh_prefetched_card(user_id=user_id, exam_id=exam_id)
+    if planned is None:
+        planned = generator.generate_next_card(user_id=user_id, exam_id=exam_id, store=store)
+    if planned is None:
         return NextCardResponse(card=None, reason=None, no_cards_available=True, message="No cards available")
+    if planned.reason == "prefetched":
+        generator.mark_prefetched_card_served(card_id=planned.card_id, user_id=user_id)
 
     now = datetime.now(timezone.utc)
     store.db.upsert_exam_session_state(
@@ -309,7 +321,12 @@ async def next_card_endpoint(exam_id: str, user_id: str = Query(...)):
         exam_id=exam_id,
         card_id=planned.card_id,
         presented_at=now,
-        info={"source": "session_planner", "reason": planned.reason},
+        info={"source": "session_orchestrator", "reason": planned.reason},
+    )
+    background_tasks.add_task(
+        SessionCardGenerationService().refill_prefetch_if_needed,
+        user_id=user_id,
+        exam_id=exam_id,
     )
     card = _card_to_response(store, planned.card_id)
     return NextCardResponse(card=card, reason=planned.reason, no_cards_available=False, message=None)
@@ -382,6 +399,7 @@ async def document_source_endpoint(doc_id: str, exam_id: str = Query(...), user_
 async def review_card_endpoint(
     exam_id: str,
     card_id: str,
+    background_tasks: BackgroundTasks,
     request: Request,
     body: Optional[ReviewCardRequest] = Body(default=None),
     user_id: Optional[str] = Form(default=None),
@@ -421,6 +439,13 @@ async def review_card_endpoint(
         if "does not belong" in message.lower():
             status = 403
         return JSONResponse({"error": message}, status_code=status)
+
+    if not result.idempotent_replay:
+        background_tasks.add_task(
+            SessionCardGenerationService().refill_prefetch_if_needed,
+            user_id=parsed_user_id,
+            exam_id=exam_id,
+        )
 
     # Keep backward-compatible fields while exposing schema fields.
     response = {
