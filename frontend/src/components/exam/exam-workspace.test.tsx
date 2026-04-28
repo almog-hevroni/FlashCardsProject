@@ -6,12 +6,14 @@ import type { Card, ReviewRating } from "@/lib/api/client";
 
 const getExamByIdMock = vi.fn();
 const getSessionNextCardMock = vi.fn();
+const getPresentedHistoryMock = vi.fn();
 const submitCardReviewMock = vi.fn();
 const logSessionEventMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   getExamById: (...args: unknown[]) => getExamByIdMock(...args),
   getSessionNextCard: (...args: unknown[]) => getSessionNextCardMock(...args),
+  getPresentedHistory: (...args: unknown[]) => getPresentedHistoryMock(...args),
   submitCardReview: (...args: unknown[]) => submitCardReviewMock(...args),
   logSessionEvent: (...args: unknown[]) => logSessionEventMock(...args),
   assertActiveRateableCard: (cardId: string, activeCardId: string | null) => {
@@ -74,6 +76,7 @@ function deferred<T>() {
 describe("ExamWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getPresentedHistoryMock.mockResolvedValue([]);
   });
 
   it("does not allow previous on first loaded card", async () => {
@@ -103,6 +106,41 @@ describe("ExamWorkspace", () => {
 
     expect(screen.getByText("Question 1")).toBeInTheDocument();
     expect(getSessionNextCardMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hydrates previous navigation from persisted presented history", async () => {
+    getExamByIdMock.mockResolvedValue({
+      exam_id: "exam-1",
+      user_id: "guest",
+      title: "Test Exam",
+      mode: "mastery",
+      state: "active_learning",
+      diagnostic_total: 0,
+      diagnostic_answered: 0,
+      diagnostic_started_at: null,
+      diagnostic_completed_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      info: {},
+    });
+    getSessionNextCardMock.mockResolvedValueOnce(nextCardResponse(buildCard("c3", "Question 3")));
+    getPresentedHistoryMock.mockResolvedValueOnce([
+      buildCard("c3", "Question 3"),
+      buildCard("c2", "Question 2"),
+      buildCard("c1", "Question 1"),
+    ]);
+    logSessionEventMock.mockResolvedValue({ event_id: "evt-1" });
+
+    renderWorkspace();
+
+    await screen.findByText("Question 3");
+    const previousButton = screen.getAllByRole("button", { name: "Previous" })[0];
+    await waitFor(() => expect(previousButton).toBeEnabled());
+
+    fireEvent.click(previousButton);
+    await screen.findByText("Question 2");
+
+    expect(getPresentedHistoryMock).toHaveBeenCalledWith("exam-1", "guest");
   });
 
   it("keeps rating visible on previous card and reuses local forward history", async () => {

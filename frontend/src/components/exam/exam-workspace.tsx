@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   assertActiveRateableCard,
   getExamById,
+  getPresentedHistory,
   getSessionNextCard,
   logSessionEvent,
   submitCardReview,
@@ -23,6 +24,15 @@ import { ProgressPanel } from "@/components/exam/progress-panel";
 type ExamWorkspaceProps = {
   examId: string;
 };
+
+function coalesceConsecutiveCards(cards: Card[]) {
+  return cards.reduce<Card[]>((history, card) => {
+    if (history.at(-1)?.card_id === card.card_id) {
+      return history;
+    }
+    return [...history, card];
+  }, []);
+}
 
 export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
   const queryClient = useQueryClient();
@@ -48,6 +58,12 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
     retry: 1,
     refetchOnWindowFocus: false,
   });
+  const presentedHistoryQuery = useQuery({
+    queryKey: ["presented-history", examId, userId],
+    queryFn: () => getPresentedHistory(examId, userId),
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
 
   const initialCard = (sessionQuery.data?.card as Card | null) ?? null;
   const seededHistoryCards = historyCards.length > 0 ? historyCards : initialCard ? [initialCard] : [];
@@ -65,6 +81,17 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
   useEffect(() => {
     void logSessionEvent(examId, userId, "session_start", { source: "exam_workspace" });
   }, [examId, userId]);
+
+  useEffect(() => {
+    const persistedHistory = presentedHistoryQuery.data ?? [];
+    if (historyCards.length > 0 || persistedHistory.length === 0) {
+      return;
+    }
+
+    const chronologicalHistory = coalesceConsecutiveCards([...persistedHistory].reverse());
+    setHistoryCards(chronologicalHistory);
+    setHistoryIndex(chronologicalHistory.length - 1);
+  }, [historyCards.length, presentedHistoryQuery.data]);
 
   const nextCardMutation = useMutation({
     mutationFn: () => getSessionNextCard(examId, userId),
