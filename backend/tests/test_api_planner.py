@@ -179,6 +179,63 @@ class ApiPlannerTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200)
         self.assertGreaterEqual(history.json()["total"], 2)
 
+    def test_presented_history_dedupes_learning_flow_cards_and_includes_rating(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now,
+            info={"source": "session_orchestrator", "reason": "generated"},
+        )
+        self.repo.add_card_review(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            topic_id="t1",
+            rating="learned_now",
+        )
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now + timedelta(minutes=1),
+            info={"source": "review_state_reducer"},
+        )
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c1",
+            presented_at=now + timedelta(minutes=2),
+            info={"source": "session_orchestrator", "reason": "progression"},
+        )
+        self.repo.append_card_presentation(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c2",
+            presented_at=now + timedelta(minutes=3),
+            info={"source": "session_orchestrator", "reason": "overdue"},
+        )
+        self.repo.add_card_review(
+            user_id=self.user_id,
+            exam_id=self.exam_id,
+            card_id="c2",
+            topic_id="t2",
+            rating="i_knew_it",
+        )
+
+        history = self.client.get(
+            f"/exams/{self.exam_id}/cards/presented-history",
+            params={"user_id": self.user_id},
+        )
+
+        self.assertEqual(history.status_code, 200)
+        payload = history.json()
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual([card["card_id"] for card in payload["cards"]], ["c2", "c1"])
+        self.assertEqual(payload["cards"][0]["info"]["rating"], "i_knew_it")
+        self.assertEqual(payload["cards"][1]["info"]["rating"], "learned_now")
+
     def test_active_learning_review_uses_unified_orchestration(self) -> None:
         res = self.client.post(
             f"/exams/{self.exam_id}/cards/c1/review",

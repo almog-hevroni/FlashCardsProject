@@ -21,7 +21,7 @@ function renderHistory() {
   );
 }
 
-function buildCard(id: string, question: string): Card {
+function buildCard(id: string, question: string, overrides?: Partial<Card>): Card {
   return {
     card_id: id,
     exam_id: "exam-1",
@@ -34,6 +34,7 @@ function buildCard(id: string, question: string): Card {
     status: "active",
     proofs: [],
     info: {},
+    ...overrides,
   };
 }
 
@@ -84,5 +85,15 @@ describe("HistoryList", () => {
     fireEvent.click(screen.getByRole("button", { name: /question 2/i }));
     expect(screen.getByRole("button", { name: /question 2/i })).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("button", { name: /show answer side/i })).toBeInTheDocument();
+  });
+
+  it("shows rating labels from history card metadata", async () => {
+    getPresentedHistoryMock.mockResolvedValue([
+      buildCard("c1", "Question 1", { info: { rating: "learned_now" } }),
+    ]);
+
+    renderHistory();
+
+    expect(await screen.findAllByText("Just learned it")).not.toHaveLength(0);
   });
 });

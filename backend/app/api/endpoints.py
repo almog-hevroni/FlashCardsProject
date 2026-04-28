@@ -31,6 +31,8 @@ from app.api.schemas import (
     TopicProficiencyResponse,
     TopicResponse,
 )
+from app.data.db_engine import get_db
+from app.data.models import CardReview
 from app.data.vector_store import VectorStore
 from app.services.diagnostic_lifecycle import DiagnosticBootstrapError, DiagnosticLifecycleService
 from app.services.exams import ImmutableExamError
@@ -42,6 +44,37 @@ from app.services.session_planner import SessionPlannerService
 from app.services.context_packs import build_diverse_chunk_pack
 
 app = FastAPI(title="DocQA Proto")
+
+
+def _latest_review_info_by_card(
+    *,
+    user_id: str,
+    exam_id: str,
+    card_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    if not card_ids:
+        return {}
+    with get_db() as db:
+        rows = (
+            db.query(CardReview)
+            .filter(
+                CardReview.user_id == user_id,
+                CardReview.exam_id == exam_id,
+                CardReview.card_id.in_(card_ids),
+            )
+            .order_by(CardReview.created_at.desc())
+            .all()
+        )
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if row.card_id in latest:
+                continue
+            latest[row.card_id] = {
+                "rating": row.rating,
+                "review_id": row.review_id,
+                "reviewed_at": row.created_at.isoformat() if row.created_at else None,
+            }
+        return latest
 
 _raw_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 _cors_origins = [origin.strip() for origin in _raw_cors_origins.split(",") if origin.strip()]
@@ -357,10 +390,48 @@ async def presented_history_endpoint(
 ):
     store = VectorStore()
     rows = store.db.list_presentations(user_id=user_id, exam_id=exam_id, ascending=False, limit=limit)
-    cards: List[CardResponse] = []
+    learning_rows = []
+    seen_card_ids = set()
+    learning_reasons = {"diagnostic", "overdue", "remediation", "progression", "generated", "prefetched"}
     for row in rows:
+        info = row.info or {}
+        if info.get("source") != "session_orchestrator":
+            continue
+        if info.get("reason") not in learning_reasons:
+            continue
+        if row.card_id in seen_card_ids:
+            continue
+        seen_card_ids.add(row.card_id)
+        learning_rows.append(row)
+    latest_reviews = _latest_review_info_by_card(
+        user_id=user_id,
+        exam_id=exam_id,
+        card_ids=[row.card_id for row in learning_rows],
+    )
+    cards: List[CardResponse] = []
+    for row in learning_rows:
         payload = _card_to_response(store, row.card_id)
         if payload is not None:
+            info = dict(payload.info or {})
+            review_info = latest_reviews.get(row.card_id)
+            info.update(
+                {
+                    "presented_at": row.presented_at,
+                    "presentation_sequence_no": row.sequence_no,
+                    "presentation_source": (row.info or {}).get("source"),
+                    "presentation_reason": (row.info or {}).get("reason"),
+                }
+            )
+            if review_info is not None:
+                info.update(
+                    {
+                        "rating": review_info.get("rating"),
+                        "last_rating": review_info.get("rating"),
+                        "review_id": review_info.get("review_id"),
+                        "reviewed_at": review_info.get("reviewed_at"),
+                    }
+                )
+            payload.info = info
             cards.append(payload)
     return CardListResponse(cards=cards, total=len(cards))
 
