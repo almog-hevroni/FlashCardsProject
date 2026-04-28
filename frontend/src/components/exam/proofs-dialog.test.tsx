@@ -41,14 +41,14 @@ describe("ProofsDialog", () => {
     );
 
     expect(
-      screen.getByRole("dialog", { name: /proofs and source context/i }),
+      screen.getByRole("dialog", { name: /evidence and source context/i }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /proof 1 - source\.pdf/i }));
+    fireEvent.click(screen.getByRole("button", { name: /receipt 1 - source\.pdf/i }));
     expect(
       screen.getByText("Source: source.pdf • Page: 3 • Span: 12-46"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: /jump to source/i }),
+      screen.getByRole("link", { name: /open the source/i }),
     ).toHaveAttribute(
       "href",
       expect.stringContaining("https://example.com/source.pdf"),
@@ -76,9 +76,9 @@ describe("ProofsDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /proof 1 - local_file\.pdf/i }));
+    fireEvent.click(screen.getByRole("button", { name: /receipt 1 - local_file\.pdf/i }));
     expect(
-      screen.getByRole("link", { name: /jump to source/i }),
+      screen.getByRole("link", { name: /open the source/i }),
     ).toHaveAttribute(
       "href",
       expect.stringContaining(
@@ -130,8 +130,8 @@ describe("ProofsDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /proof 1 - first\.pdf/i }));
-    fireEvent.click(screen.getByRole("button", { name: /proof 2 - second\.pdf/i }));
+    fireEvent.click(screen.getByRole("button", { name: /receipt 1 - first\.pdf/i }));
+    fireEvent.click(screen.getByRole("button", { name: /receipt 2 - second\.pdf/i }));
 
     expect(screen.getByText("First proof text")).toBeInTheDocument();
     expect(screen.getByText("Second proof text")).toBeInTheDocument();

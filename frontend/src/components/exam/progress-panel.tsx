@@ -46,8 +46,8 @@ export function ProgressPanel({ examId, userId, isOpen, onToggle }: ProgressPane
           className="progress-panel__toggle"
           type="button"
           onClick={onToggle}
-          aria-label="Show progress sidebar"
-          title="Show progress sidebar"
+          aria-label="Show progress panel"
+          title="Show progress panel"
         >
           <PanelRight className="progress-panel__toggle-icon" size={18} aria-hidden="true" />
         </button>
@@ -56,19 +56,19 @@ export function ProgressPanel({ examId, userId, isOpen, onToggle }: ProgressPane
       {isOpen ? (
         <div className="progress-panel__content">
           <div className="progress-panel__header">
-            <h2 className="progress-panel__title">Progress</h2>
+            <h2 className="progress-panel__title">Mastery Meter</h2>
             <button
               className="progress-panel__toggle"
               type="button"
               onClick={onToggle}
-              aria-label="Hide progress sidebar"
-              title="Hide progress sidebar"
+              aria-label="Hide progress panel"
+              title="Hide progress panel"
             >
               <PanelRight className="progress-panel__toggle-icon progress-panel__toggle-icon--open" size={18} aria-hidden="true" />
             </button>
           </div>
 
-          {isLoading ? <p className="progress-panel__hint">Loading progress...</p> : null}
+          {isLoading ? <p className="progress-panel__hint">Measuring your intellectual sparkle...</p> : null}
 
           {progressError ? (
             <div>
@@ -94,7 +94,7 @@ export function ProgressPanel({ examId, userId, isOpen, onToggle }: ProgressPane
           ) : null}
 
           {!isLoading && !isError && (data?.topics.length ?? 0) === 0 ? (
-            <p className="progress-panel__hint">No topic progress yet. Rate cards to build progress.</p>
+            <p className="progress-panel__hint">No topic progress yet. Rate a few cards and the meter will wake up.</p>
           ) : null}
 
           {!isLoading && !isError && (data?.topics.length ?? 0) > 0 ? (

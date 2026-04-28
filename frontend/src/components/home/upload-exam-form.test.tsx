@@ -39,15 +39,17 @@ describe("UploadExamForm", () => {
     renderWithQueryClient();
 
     expect(screen.getByRole("heading", { name: "FlashCards" })).toBeInTheDocument();
-    expect(screen.getByText(/Start here - upload your study files/i)).toBeInTheDocument();
-    expect(screen.getByText("Step 1 - Drop your study files")).toBeInTheDocument();
-    expect(screen.getByText("Step 2 - Give your exam a name")).toBeInTheDocument();
-    expect(screen.getByText("Step 3 - Create the magic")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create the magic" })).toBeInTheDocument();
+    expect(screen.getByText(/get a clean, sourced study deck/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Deck name")).toBeInTheDocument();
+    expect(screen.getByText("Add your study files")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create my cards" })).toBeInTheDocument();
+    expect(screen.getByText(/Drag in PDFs, DOCX, or TXT files/i)).toBeInTheDocument();
     expect(screen.getByText("PDF")).toBeInTheDocument();
     expect(screen.getByText("DOCX")).toBeInTheDocument();
     expect(screen.getByText("TXT")).toBeInTheDocument();
-    expect(screen.getByText(/Supported file types: \.pdf, \.docx, \.txt/)).toBeInTheDocument();
+    expect(screen.getByText("Slides")).toBeInTheDocument();
+    expect(screen.getByText("Notes")).toBeInTheDocument();
+    expect(screen.getByText("Summaries")).toBeInTheDocument();
   });
 
   it("uploads selected files and redirects to exam page", async () => {
@@ -72,10 +74,10 @@ describe("UploadExamForm", () => {
       },
     });
 
-    fireEvent.change(screen.getByLabelText("Exam title"), {
+    fireEvent.change(screen.getByLabelText("Deck name"), {
       target: { value: "Networks exam" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create the magic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create my cards" }));
 
     await waitFor(() => {
       expect(createExamFromUploadMock).toHaveBeenCalledTimes(1);
@@ -104,7 +106,7 @@ describe("UploadExamForm", () => {
     await waitFor(() => {
       expect(screen.getByText("first.pdf")).toBeInTheDocument();
       expect(screen.getByText("second.txt")).toBeInTheDocument();
-      expect(screen.getByText("2 files selected")).toBeInTheDocument();
+      expect(screen.getByText("2 files queued for a very productive glow-up")).toBeInTheDocument();
     });
   });
 
@@ -129,7 +131,7 @@ describe("UploadExamForm", () => {
     await waitFor(() => {
       expect(screen.getByText("a.pdf")).toBeInTheDocument();
       expect(screen.getByText("b.docx")).toBeInTheDocument();
-      expect(screen.getByText("2 files selected")).toBeInTheDocument();
+      expect(screen.getByText("2 files queued for a very productive glow-up")).toBeInTheDocument();
     });
   });
 
@@ -140,7 +142,7 @@ describe("UploadExamForm", () => {
       throw new Error("Missing upload input");
     }
 
-    const createMagicButton = screen.getByRole("button", { name: "Create the magic" });
+    const createMagicButton = screen.getByRole("button", { name: "Create my cards" });
     expect(createMagicButton).toBeDisabled();
 
     fireEvent.change(fileInput, {
@@ -150,7 +152,7 @@ describe("UploadExamForm", () => {
     });
     expect(createMagicButton).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("Exam title"), {
+    fireEvent.change(screen.getByLabelText("Deck name"), {
       target: { value: "Ready exam title" },
     });
     expect(createMagicButton).not.toBeDisabled();
@@ -177,10 +179,10 @@ describe("UploadExamForm", () => {
         files: [new File(["hello"], "notes.txt", { type: "text/plain" })],
       },
     });
-    fireEvent.change(screen.getByLabelText("Exam title"), {
+    fireEvent.change(screen.getByLabelText("Deck name"), {
       target: { value: "Networks exam" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create the magic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create my cards" }));
 
     await waitFor(() => {
       expect(screen.getByText("Please review your files and title, then try again.")).toBeInTheDocument();

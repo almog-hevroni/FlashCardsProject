@@ -11,6 +11,7 @@ import {
   type FormEvent,
   type RefObject,
 } from "react";
+import { motion } from "framer-motion";
 import { useMutation } from "@tanstack/react-query";
 import { createExamFromUpload } from "@/lib/api/client";
 import { mapHomeApiError } from "@/lib/api/ui-error";
@@ -20,11 +21,14 @@ import { MagicUploadProgress } from "@/components/home/magic-upload-progress";
 import { useGuestSession } from "@/lib/session/guest-session";
 
 const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
-const DOCUMENT_TYPE_CARDS = [
-  { extension: "PDF", label: "Lecture slides", tone: "pdf" },
-  { extension: "DOCX", label: "Class notes", tone: "docx" },
-  { extension: "TXT", label: "Summaries", tone: "txt" },
-] as const;
+const sectionMotion = {
+  hidden: { opacity: 0, y: 28 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.55, ease: "easeOut" as const },
+  },
+};
 
 function buildFileKey(file: File) {
   return `${file.name}:${file.size}:${file.lastModified}`;
@@ -80,14 +84,14 @@ export function UploadExamForm({
 
   const selectedSummary = useMemo(() => {
     if (selectedUploads.length === 0) {
-      return "No files selected yet.";
+      return "No files yet. The stage is politely waiting.";
     }
 
     if (selectedUploads.length === 1) {
-      return `Selected: ${selectedUploads[0].file.name}`;
+      return `Ready to study: ${selectedUploads[0].file.name}`;
     }
 
-    return `${selectedUploads.length} files selected`;
+    return `${selectedUploads.length} files queued for a very productive glow-up`;
   }, [selectedUploads]);
   const titleValue = title.trim();
   const hasFiles = selectedUploads.length > 0;
@@ -199,7 +203,7 @@ export function UploadExamForm({
     <section
       id={id}
       ref={sectionRef}
-      className="home-upload-flow"
+      className="home-upload-flow home-upload-flow--single"
       tabIndex={-1}
       onFocus={onFocusWithin}
       onDrop={onDrop}
@@ -209,110 +213,87 @@ export function UploadExamForm({
     >
       <MagicSparklesBackground />
 
-      <form className="home-upload-flow__form" onSubmit={onSubmit}>
-        <section
-          className="home-upload-flow__section home-upload-flow__section--hero"
-          aria-label="Hero"
+      <motion.form
+        className="home-upload-flow__form home-upload-flow__form--single"
+        onSubmit={onSubmit}
+        initial="hidden"
+        animate="visible"
+      >
+        <motion.div
+          variants={sectionMotion}
+          className="home-upload-composer"
+          aria-label="Create your study deck"
         >
-          <div className="home-upload-flow__inner home-upload-flow__inner--hero">
+          <header className="home-upload-composer__hero">
             <h1 className="home-upload-card__title">FlashCards</h1>
             <p className="home-upload-card__subtitle">
-              Start here - upload your study files and let FlashCards build
-              smart, evidence-based cards for you.
+              Upload your material and get a clean, sourced study deck in one
+              simple move.
             </p>
-          </div>
-        </section>
+          </header>
 
-        <section
-          className="home-upload-flow__section"
-          aria-label="Step 1 drop files"
-        >
-          <div className="home-upload-flow__inner">
-            <section className="home-upload-card__panel home-upload-card__panel--animated home-upload-flow__section-content home-upload-flow__section-content--step1">
-              <div className="home-upload-card__step1-shell">
-                <h2 className="home-upload-card__panel-title">
-                  Step 1 - Drop your study files
-                </h2>
-                <p className="home-upload-card__panel-subtitle">
-                  Add one or many files. Keep dropping files naturally while you
-                  scroll through the flow.
-                </p>
+          <section className="home-upload-card__panel home-upload-card__panel--animated home-upload-composer__panel">
+            <div className="home-upload-composer__title-row">
+              <label className="home-upload-card__label" htmlFor={titleInputId}>
+                Deck name
+              </label>
+              <input
+                className="home-upload-card__input"
+                id={titleInputId}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="What are we studying today?"
+              />
+            </div>
 
+            <div
+              className={`home-upload-card__dropzone home-upload-card__dropzone--composer${
+                isDragActive ? " home-upload-card__dropzone--active" : ""
+              }`}
+              role="button"
+              tabIndex={0}
+              onClick={() => filesInputRef.current?.click()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  filesInputRef.current?.click();
+                }
+              }}
+              aria-label="Drop files here or click to choose files"
+            >
+              <p className="home-upload-card__dropzone-title">
+                {isDragActive
+                  ? "Drop them here"
+                  : "Add your study files"}
+              </p>
+              <p className="home-upload-card__dropzone-hint">
+                Drag in PDFs, DOCX, or TXT files, or choose them from your
+                device.
+              </p>
+              {selectedUploads.length === 0 ? (
                 <div
-                  className="home-upload-card__doc-preview home-upload-card__doc-preview--full"
-                  aria-hidden="true"
+                  className="home-upload-card__doc-preview home-upload-card__doc-preview--compact"
+                  aria-label="Supported file examples"
                 >
-                  {DOCUMENT_TYPE_CARDS.map((documentType) => (
-                    <article
-                      key={documentType.extension}
-                      className={`home-upload-card__doc-card home-upload-card__doc-card--${documentType.tone}`}
-                    >
-                      <span className="home-upload-card__doc-badge">
-                        {documentType.extension}
-                      </span>
-                      <span className="home-upload-card__doc-icon">📄</span>
-                      <span className="home-upload-card__doc-label">
-                        {documentType.label}
-                      </span>
-                    </article>
-                  ))}
+                  <article className="home-upload-card__doc-card home-upload-card__doc-card--pdf">
+                    <span className="home-upload-card__doc-badge">PDF</span>
+                    <span className="home-upload-card__doc-icon" aria-hidden="true">📄</span>
+                    <span className="home-upload-card__doc-label">Slides</span>
+                  </article>
+                  <article className="home-upload-card__doc-card home-upload-card__doc-card--docx">
+                    <span className="home-upload-card__doc-badge">DOCX</span>
+                    <span className="home-upload-card__doc-icon" aria-hidden="true">📝</span>
+                    <span className="home-upload-card__doc-label">Notes</span>
+                  </article>
+                  <article className="home-upload-card__doc-card home-upload-card__doc-card--txt">
+                    <span className="home-upload-card__doc-badge">TXT</span>
+                    <span className="home-upload-card__doc-icon" aria-hidden="true">✦</span>
+                    <span className="home-upload-card__doc-label">Summaries</span>
+                  </article>
                 </div>
-
-                <div
-                  className={`home-upload-card__dropzone home-upload-card__dropzone--full${
-                    isDragActive ? " home-upload-card__dropzone--active" : ""
-                  }`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => filesInputRef.current?.click()}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      filesInputRef.current?.click();
-                    }
-                  }}
-                  aria-label="Drop files here or click to choose files"
-                >
-                  <p className="home-upload-card__dropzone-title">
-                    {isDragActive
-                      ? "Drop files to upload"
-                      : "Drag and drop files here"}
-                  </p>
-                  <p className="home-upload-card__dropzone-hint">
-                    or click to choose files from your device
-                  </p>
-                  <button
-                    className="home-upload-card__pick"
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      filesInputRef.current?.click();
-                    }}
-                    disabled={uploadMutation.isPending}
-                  >
-                    Choose files
-                  </button>
-                </div>
-              </div>
-
-              <div
-                className="home-upload-card__selected-wrap"
-                aria-live="polite"
-              >
-                <p className="home-upload-card__selected">{selectedSummary}</p>
-                {selectedUploads.length > 0 ? (
-                  <button
-                    className="home-upload-card__clear"
-                    type="button"
-                    onClick={() => setSelectedUploads([])}
-                  >
-                    Clear all
-                  </button>
-                ) : null}
-              </div>
-              {selectedUploads.length > 0 ? (
+              ) : (
                 <ul
-                  className="home-upload-card__file-list"
+                  className="home-upload-card__file-list home-upload-card__file-list--composer"
                   aria-label="Selected files"
                 >
                   {selectedUploads.map((upload) => (
@@ -328,103 +309,57 @@ export function UploadExamForm({
                           {upload.file.name}
                         </span>
                         <span className="home-upload-card__file-kind">
-                          Document
+                          Study material
                         </span>
                       </div>
                       <button
                         className="home-upload-card__file-remove"
                         type="button"
                         aria-label={`Remove ${upload.file.name}`}
-                        onClick={() =>
+                        onClick={(event) => {
+                          event.stopPropagation();
                           setSelectedUploads((previous) =>
                             previous.filter((item) => item.id !== upload.id),
-                          )
-                        }
+                          );
+                        }}
                       >
                         ×
                       </button>
                     </li>
                   ))}
                 </ul>
+              )}
+              <button
+                className="home-upload-card__pick"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  filesInputRef.current?.click();
+                }}
+                disabled={uploadMutation.isPending}
+              >
+                Choose files
+              </button>
+            </div>
+
+            <div className="home-upload-card__selected-wrap" aria-live="polite">
+              <p className="home-upload-card__selected">{selectedSummary}</p>
+              {selectedUploads.length > 0 ? (
+                <button
+                  className="home-upload-card__clear"
+                  type="button"
+                  onClick={() => setSelectedUploads([])}
+                >
+                  Clear the guest list
+                </button>
               ) : null}
-              <p className="home-upload-card__supported">
-                Supported file types: {SUPPORTED_EXTENSIONS.join(", ")} | You
-                can select multiple files
-              </p>
-              {uploadError ? (
-                <p className="home-upload-card__error" role="alert">
-                  {uploadError}
-                </p>
-              ) : null}
-            </section>
-          </div>
-        </section>
+            </div>
 
-        <section
-          className="home-upload-flow__section"
-          aria-label="Step 2 exam title"
-        >
-          <div className="home-upload-flow__inner">
-            <section className="home-upload-card__panel home-upload-card__panel--animated home-upload-flow__section-content">
-              <h2 className="home-upload-card__panel-title">
-                Step 2 - Give your exam a name
-              </h2>
-              <p className="home-upload-card__panel-subtitle">
-                Pick a clear title so you can find it quickly later.
+            {uploadError ? (
+              <p className="home-upload-card__error" role="alert">
+                {uploadError}
               </p>
-              <label className="home-upload-card__label" htmlFor={titleInputId}>
-                Exam title
-              </label>
-              <input
-                className="home-upload-card__input"
-                id={titleInputId}
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Network Layer Final Review"
-              />
-            </section>
-          </div>
-        </section>
-
-        <input
-          ref={filesInputRef}
-          type="file"
-          hidden
-          multiple
-          onChange={(event) => {
-            updateFiles(event.target.files);
-            event.currentTarget.value = "";
-          }}
-          accept={SUPPORTED_EXTENSIONS.join(",")}
-        />
-
-        <section className="home-upload-flow__section" aria-label="Summary">
-          <div className="home-upload-flow__inner">
-            <section className="home-upload-card__panel home-upload-card__panel--animated home-upload-flow__section-content">
-              <h2 className="home-upload-card__panel-title">
-                Step 3 - Create the magic
-              </h2>
-              <p className="home-upload-card__panel-subtitle">
-                Review your setup, then let AI generate your exam.
-              </p>
-              <div className="home-upload-card__summary">
-                <article className="home-upload-card__summary-item">
-                  <span className="home-upload-card__summary-label">
-                    Uploaded files
-                  </span>
-                  <span className="home-upload-card__summary-value">
-                    {selectedUploads.length}
-                  </span>
-                </article>
-                <article className="home-upload-card__summary-item">
-                  <span className="home-upload-card__summary-label">
-                    Exam title
-                  </span>
-                  <span className="home-upload-card__summary-value">
-                    {titleValue || "Not set yet"}
-                  </span>
-                </article>
-              </div>
+            ) : null}
 
               {uploadMutation.isError ? (
                 <InlineError
@@ -436,7 +371,7 @@ export function UploadExamForm({
               {uploadMutation.isPending ? <MagicUploadProgress /> : null}
 
               {!uploadMutation.isPending ? (
-                <div className="home-upload-card__actions">
+                <div className="home-upload-card__actions home-upload-card__actions--composer">
                   <button
                     className={`home-upload-card__action home-upload-card__action--primary home-upload-card__magic-button home-upload-card__magic-button--large${
                       hasFiles && hasTitle ? " is-ready" : ""
@@ -444,14 +379,25 @@ export function UploadExamForm({
                     type="submit"
                     disabled={!hasFiles || !hasTitle}
                   >
-                    <span className="home-upload-card__magic-button-text">Create the magic</span>
+                    <span className="home-upload-card__magic-button-text">Create my cards</span>
                   </button>
                 </div>
               ) : null}
-            </section>
-          </div>
-        </section>
-      </form>
+          </section>
+
+          <input
+            ref={filesInputRef}
+            type="file"
+            hidden
+            multiple
+            onChange={(event) => {
+              updateFiles(event.target.files);
+              event.currentTarget.value = "";
+            }}
+            accept={SUPPORTED_EXTENSIONS.join(",")}
+          />
+        </motion.div>
+      </motion.form>
     </section>
   );
 }

@@ -43,7 +43,7 @@ describe("FlashcardPlayer", () => {
 
     expect(screen.getByText("Question")).toBeInTheDocument();
     expect(screen.getByText("What does TCP guarantee?")).toBeInTheDocument();
-    expect(screen.getByText("Tap to flip")).toBeInTheDocument();
+    expect(screen.getByText("Tap to reveal the plot twist")).toBeInTheDocument();
     expect(screen.getByText("Topic: Networks")).toBeInTheDocument();
     expect(screen.getByText("Difficulty 2")).toBeInTheDocument();
   });
@@ -70,8 +70,8 @@ describe("FlashcardPlayer", () => {
 
     expect(screen.getByText("Answer")).toBeInTheDocument();
     expect(screen.getByText("Reliable ordered delivery.")).toBeInTheDocument();
-    expect(screen.getByText("Show question")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "View proofs" })).toBeInTheDocument();
+    expect(screen.getByText("Back to the question")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show receipts" })).toBeInTheDocument();
   });
 
   it("opens proofs without flipping when tapping view proofs", () => {
@@ -97,7 +97,7 @@ describe("FlashcardPlayer", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "View proofs" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show receipts" }));
     expect(onShowProofs).toHaveBeenCalledWith(card);
     expect(onToggleAnswer).not.toHaveBeenCalled();
   });
@@ -146,7 +146,7 @@ describe("FlashcardPlayer", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /I knew it/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Nailed it/i }));
     expect(onRate).toHaveBeenCalledWith("i_knew_it");
   });
 
@@ -170,7 +170,7 @@ describe("FlashcardPlayer", () => {
       />,
     );
 
-    expect(screen.getByText("Getting to know you ✨")).toBeInTheDocument();
+    expect(screen.getByText("Calibrating your brilliance")).toBeInTheDocument();
   });
 
   it("shows next-card preparation feedback while pending", () => {
@@ -193,7 +193,7 @@ describe("FlashcardPlayer", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Preparing next card..." })).toBeDisabled();
-    expect(screen.getByText(/Preparing a new card for your current level/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preparing..." })).toBeDisabled();
+    expect(screen.getByText(/Preparing a card that matches your current level/i)).toBeInTheDocument();
   });
 });

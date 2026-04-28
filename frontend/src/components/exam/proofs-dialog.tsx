@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Card, ProofSpan } from "@/lib/api/client";
 
 type ProofsDialogProps = {
@@ -69,11 +69,10 @@ export function ProofsDialog({
 }: ProofsDialogProps) {
   const [openProofKeys, setOpenProofKeys] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
-    if (!isOpen) {
-      setOpenProofKeys(new Set());
-    }
-  }, [isOpen, card?.card_id]);
+  const closeDialog = useCallback(() => {
+    setOpenProofKeys(new Set());
+    onClose();
+  }, [onClose]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -81,7 +80,7 @@ export function ProofsDialog({
     }
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        onClose();
+        closeDialog();
       }
     }
     document.addEventListener("keydown", handleEscape);
@@ -91,7 +90,7 @@ export function ProofsDialog({
       document.removeEventListener("keydown", handleEscape);
       document.body.style.overflow = previousOverflow;
     };
-  }, [isOpen, onClose]);
+  }, [closeDialog, isOpen]);
 
   if (!isOpen || !card) {
     return null;
@@ -110,27 +109,33 @@ export function ProofsDialog({
   }
 
   return (
-    <div
+    <motion.div
       className="proofs-dialog__backdrop"
       role="presentation"
-      onClick={onClose}
+      onClick={closeDialog}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
     >
-      <section
+      <motion.section
         className="proofs-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Proofs and source context"
+        aria-label="Evidence and source context"
         onClick={(event) => event.stopPropagation()}
+        initial={{ opacity: 0, y: 24, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.24, ease: "easeOut" }}
       >
         <header className="proofs-dialog__header">
           <div>
-            <h2 className="proofs-dialog__title">Proofs</h2>
+            <h2 className="proofs-dialog__title">Receipts, elegantly filed</h2>
             <p className="proofs-dialog__subtitle">{card.question}</p>
           </div>
           <button
             className="proofs-dialog__close"
             type="button"
-            onClick={onClose}
+            onClick={closeDialog}
           >
             Close
           </button>
@@ -139,7 +144,7 @@ export function ProofsDialog({
         <div className="proofs-dialog__content">
           {card.proofs.length === 0 ? (
             <p className="proofs-dialog__empty">
-              No proofs are available for this card yet.
+              No receipts for this card yet. It remains charmingly undocumented.
             </p>
           ) : (
             <ul className="proofs-dialog__list">
@@ -162,7 +167,7 @@ export function ProofsDialog({
                       onClick={() => toggleProof(proofKey)}
                     >
                       <span className="proofs-dialog__trigger-title">
-                        Proof {proofIndex + 1} - {sourceLabel}
+                        Receipt {proofIndex + 1} - {sourceLabel}
                       </span>
                       <ChevronDown
                         size={16}
@@ -195,7 +200,7 @@ export function ProofsDialog({
                               target="_blank"
                               rel="noreferrer"
                             >
-                              Jump to source
+                              Open the source
                             </a>
                           </div>
                         </motion.div>
@@ -207,7 +212,7 @@ export function ProofsDialog({
             </ul>
           )}
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }

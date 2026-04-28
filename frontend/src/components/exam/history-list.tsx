@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertCircle,
@@ -77,25 +77,25 @@ const ratingUiMap: Record<
   }
 > = {
   i_knew_it: {
-    label: "I knew it",
+    label: "Nailed it",
     icon: CheckCircle2,
     iconClassName: "text-emerald-500",
     badgeClassName: "border border-emerald-200 bg-emerald-50 text-emerald-700",
   },
   almost_knew: {
-    label: "Almost knew",
+    label: "Nearly there",
     icon: HelpCircle,
     iconClassName: "text-amber-500",
     badgeClassName: "border border-amber-200 bg-amber-50 text-amber-700",
   },
   learned_now: {
-    label: "Learned now",
+    label: "Just learned it",
     icon: Brain,
     iconClassName: "text-sky-500",
     badgeClassName: "border border-sky-200 bg-sky-50 text-sky-700",
   },
   dont_understand: {
-    label: "Don't understand",
+    label: "Still mysterious",
     icon: AlertCircle,
     iconClassName: "text-rose-500",
     badgeClassName: "border border-rose-200 bg-rose-50 text-rose-700",
@@ -163,10 +163,10 @@ export function HistoryList({ examId }: HistoryListProps) {
     selectedCard &&
     typeof selectedCard.info?.card_type === "string" &&
     selectedCard.info.card_type === "diagnostic"
-      ? "Getting to know you"
+      ? "Calibrating your brilliance"
       : selectedCard
         ? `Difficulty ${selectedCard.difficulty}`
-        : "Difficulty unknown";
+        : "Difficulty: mysterious";
 
   const examError = examQuery.isError
     ? mapApiError(examQuery.error, "exam.workspace.load_exam")
@@ -175,32 +175,28 @@ export function HistoryList({ examId }: HistoryListProps) {
     ? mapApiError(historyQuery.error, "exam.workspace.load_session")
     : null;
 
-  useEffect(() => {
-    setActiveProofIndex(selectedCard?.proofs.length ? 0 : null);
-  }, [selectedCard?.card_id, selectedCard?.proofs.length]);
-
   return (
     <section
-      className="h-[calc(100vh-3.75rem)] overflow-hidden p-3 md:p-4"
+      className="h-[calc(100vh-4rem)] overflow-hidden bg-gradient-to-br from-orange-50 via-sky-50 to-rose-50 p-3 md:p-4"
       aria-label="Exam history"
     >
       <div className="grid h-full grid-cols-1 gap-3 lg:grid-cols-[22rem_minmax(0,1fr)]">
-        <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-300/60 bg-white/80 p-3 shadow-sm backdrop-blur">
+        <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-blue-100/80 bg-white/80 p-3 shadow-xl shadow-blue-900/10 backdrop-blur-xl">
           <div className="mb-3 flex items-start justify-between gap-2">
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-slate-900">
                 {examQuery.data?.title ??
-                  (examQuery.isLoading ? "Loading exam..." : "Exam history")}
+                  (examQuery.isLoading ? "Loading your trail..." : "Study trail")}
               </p>
               <p className="text-xs text-slate-500">
-                Review cards shown in this exam
+                Revisit the cards you have already met
               </p>
             </div>
             <Link
               className="inline-flex shrink-0 items-center rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
               href={`/exams/${examId}`}
             >
-              Back
+              Back to deck
             </Link>
           </div>
 
@@ -225,14 +221,14 @@ export function HistoryList({ examId }: HistoryListProps) {
 
           {!historyQuery.isError && historyQuery.isLoading ? (
             <p className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-              Loading presented cards...
+              Gathering the cards you have seen...
             </p>
           ) : null}
           {!historyQuery.isLoading &&
           !historyQuery.isError &&
           cards.length === 0 ? (
             <p className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-              No presented cards yet for this exam.
+              No cards have walked across the stage yet.
             </p>
           ) : null}
 
@@ -260,8 +256,8 @@ export function HistoryList({ examId }: HistoryListProps) {
                       type="button"
                       className={`group w-full rounded-2xl border px-3 py-3 text-left transition ${
                         isActive
-                          ? "border-indigo-400 bg-indigo-50 shadow-sm"
-                          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                          ? "border-indigo-300 bg-indigo-50 shadow-md shadow-indigo-900/10"
+                          : "border-blue-100 bg-white/85 shadow-sm hover:border-indigo-200 hover:bg-sky-50"
                       }`}
                       onClick={() => {
                         setSelectedCardId(card.card_id);
@@ -307,10 +303,10 @@ export function HistoryList({ examId }: HistoryListProps) {
         </aside>
 
         <main
-          className="relative h-full min-h-0 overflow-hidden rounded-3xl border border-slate-300/60 p-4 md:p-6"
+          className="relative h-full min-h-0 overflow-hidden rounded-3xl border border-blue-100/80 p-4 shadow-xl shadow-blue-900/10 md:p-6"
           style={{
             background:
-              "radial-gradient(circle at 92% 7%, rgba(149, 208, 190, 0.2), transparent 38%), radial-gradient(circle at 12% 94%, rgba(240, 213, 90, 0.2), transparent 34%), linear-gradient(180deg, #f8fbff 0%, #f0f6fc 100%)",
+              "radial-gradient(circle at 92% 7%, rgba(101, 228, 178, 0.24), transparent 38%), radial-gradient(circle at 12% 94%, rgba(255, 216, 77, 0.24), transparent 34%), linear-gradient(180deg, rgba(255,255,255,0.92) 0%, rgba(239,246,255,0.86) 100%)",
           }}
         >
           <div
@@ -323,7 +319,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                   Nothing to review yet
                 </p>
                 <p className="mt-2 text-sm text-slate-500">
-                  Pick a card from the left once history is available.
+                  Once history arrives, pick a card and stroll through your past brilliance.
                 </p>
               </div>
             ) : (
@@ -366,7 +362,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                         className="absolute inset-0 flex h-full flex-col rounded-3xl border border-slate-300/75 p-4 md:p-6"
                         style={{
                           background:
-                            "radial-gradient(circle at 88% 8%, rgba(240, 213, 90, 0.24), transparent 34%), linear-gradient(180deg, #ffffff 0%, #f4f9ff 100%)",
+                            "radial-gradient(circle at 88% 8%, rgba(255, 216, 77, 0.28), transparent 34%), radial-gradient(circle at 10% 86%, rgba(56, 189, 248, 0.18), transparent 34%), linear-gradient(180deg, #ffffff 0%, #f4f9ff 100%)",
                           backfaceVisibility: "hidden",
                         }}
                       >
@@ -394,7 +390,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                         </div>
 
                         <p className="mt-3 text-center text-xs font-medium uppercase tracking-wide text-slate-500">
-                          Tap card to flip
+                          Tap for the satisfying reveal
                         </p>
                       </article>
 
@@ -402,14 +398,14 @@ export function HistoryList({ examId }: HistoryListProps) {
                         className="absolute inset-0 flex h-full flex-col rounded-3xl border border-slate-300/75 p-4 md:p-6"
                         style={{
                           background:
-                            "radial-gradient(circle at 86% 9%, rgba(149, 208, 190, 0.22), transparent 34%), linear-gradient(180deg, #ffffff 0%, #eef6ff 100%)",
+                            "radial-gradient(circle at 86% 9%, rgba(101, 228, 178, 0.26), transparent 34%), radial-gradient(circle at 10% 88%, rgba(139, 92, 246, 0.16), transparent 34%), linear-gradient(180deg, #ffffff 0%, #eef6ff 100%)",
                           backfaceVisibility: "hidden",
                           transform: "rotateY(180deg)",
                         }}
                       >
                         <div className="mb-4 flex items-center justify-between gap-2">
                           <span className="rounded-full border border-teal-200 bg-teal-50 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-teal-800">
-                            ANSWER &amp; PROOFS
+                              ANSWER &amp; RECEIPTS
                           </span>
                           <span className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-sm font-medium text-violet-700">
                             {difficultyLabel}
@@ -450,7 +446,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                               >
                                 <IdeaIcon className="h-10 w-10" />
                               </motion.span>
-                              Supporting proofs
+                              Supporting receipts
                             </p>
                           </div>
 
@@ -474,7 +470,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                                     }}
                                   >
                                     <span className="text-sm font-semibold text-slate-700">
-                                      Proof {proofIndex + 1} - {proof.doc_id}
+                                      Receipt {proofIndex + 1} - {proof.doc_id}
                                     </span>
                                     <ChevronDown
                                       size={16}
@@ -518,7 +514,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                             </ul>
                           ) : (
                             <p className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                              No proofs attached to this card.
+                              No receipts attached to this card.
                             </p>
                           )}
                         </div>
@@ -532,7 +528,7 @@ export function HistoryList({ examId }: HistoryListProps) {
                           }}
                         >
                           <RotateCcw size={14} />
-                          Show question
+                          Show the question
                         </button>
                       </article>
                     </motion.div>

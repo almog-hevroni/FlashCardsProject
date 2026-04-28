@@ -6,7 +6,7 @@ export function AppShell({ children }: PropsWithChildren) {
     <div className="app-shell">
       <header className="app-shell__header">
         <Link href="/" className="app-shell__brand app-shell__brand-link cursor-pointer" aria-label="Go to home">
-          FlashCards
+          FlashCards Studio
         </Link>
       </header>
       <main className="app-shell__main">{children}</main>

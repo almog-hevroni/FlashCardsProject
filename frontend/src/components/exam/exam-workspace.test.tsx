@@ -143,19 +143,19 @@ describe("ExamWorkspace", () => {
     renderWorkspace();
 
     await screen.findByText("Question 1");
-    fireEvent.click(screen.getByRole("button", { name: /I knew it/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Nailed it/i }));
     await waitFor(() => expect(submitCardReviewMock).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Next card" })[0]);
     await screen.findByText("Question 2");
 
     fireEvent.click(screen.getAllByRole("button", { name: "Previous" })[0]);
     await screen.findByText("Question 1");
 
-    expect(screen.getByRole("button", { name: /I knew it/i })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: /Almost knew/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Nailed it/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Nearly there/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Next card" })[0]);
     await screen.findByText("Question 2");
     expect(getSessionNextCardMock).toHaveBeenCalledTimes(2);
   });
@@ -197,14 +197,14 @@ describe("ExamWorkspace", () => {
     renderWorkspace();
 
     await screen.findByText("Question 1");
-    fireEvent.click(screen.getByRole("button", { name: /I knew it/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Nailed it/i }));
     await waitFor(() => expect(submitCardReviewMock).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Next card" })[0]);
 
     expect(screen.getByText("Question 1")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Preparing next card..." })).toBeDisabled();
-    expect(screen.getByText(/Preparing a new card for your current level/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Preparing..." })).toBeDisabled();
+    expect(screen.getByText(/Preparing a card that matches your current level/i)).toBeInTheDocument();
 
     pendingNext.resolve(nextCardResponse(buildCard("c2", "Question 2")));
     await screen.findByText("Question 2");

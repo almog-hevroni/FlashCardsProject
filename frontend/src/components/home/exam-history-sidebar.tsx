@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { InlineError } from "@/components/common/inline-error";
 import { listRecentExams } from "@/lib/api/client";
@@ -11,7 +12,6 @@ import { useGuestSession } from "@/lib/session/guest-session";
 
 type ExamHistorySidebarProps = {
   className?: string;
-  onNewExam: () => void;
   onNavigate?: () => void;
 };
 
@@ -27,7 +27,7 @@ function formatTimestamp(value: string) {
   }).format(date);
 }
 
-export function ExamHistorySidebar({ className, onNewExam, onNavigate }: ExamHistorySidebarProps) {
+export function ExamHistorySidebar({ className, onNavigate }: ExamHistorySidebarProps) {
   const router = useRouter();
   const accountRef = useRef<HTMLDivElement | null>(null);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
@@ -73,15 +73,18 @@ export function ExamHistorySidebar({ className, onNewExam, onNavigate }: ExamHis
   }
 
   return (
-    <aside id="home-sidebar" className={className} aria-label="Exam history sidebar">
-      <button className="home-sidebar__new-exam" type="button" onClick={onNewExam}>
-        + New exam
-      </button>
+    <motion.aside
+      id="home-sidebar"
+      className={className}
+      aria-label="Exam history sidebar"
+      initial={{ opacity: 0, x: -16 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+    >
+      <section className="home-sidebar__history">
+        <h2 className="home-sidebar__section-label">Recent decks</h2>
 
-      <section>
-        <h2 className="home-sidebar__section-label">Recent exams</h2>
-
-        {isLoading ? <p className="home-sidebar__hint">Loading recent exams...</p> : null}
+        {isLoading ? <p className="home-sidebar__hint">Finding your latest brain snacks...</p> : null}
 
         {isError ? (
           <InlineError
@@ -91,40 +94,53 @@ export function ExamHistorySidebar({ className, onNewExam, onNavigate }: ExamHis
         ) : null}
 
         {!isLoading && !isError && recentExams.length === 0 ? (
-          <p className="home-sidebar__hint">No recent exams yet.</p>
+          <p className="home-sidebar__hint">No decks yet. Your comeback arc starts with one upload.</p>
         ) : null}
 
         {!isLoading && !isError && recentExams.length > 0 ? (
-          <ul className="home-sidebar__recent-list">
+          <ul
+            className="home-sidebar__recent-list"
+            style={{ maxHeight: "none", overflow: "visible" }}
+          >
             {recentExams.map((exam) => (
               <li key={exam.exam_id}>
-                <button
+                <motion.button
                   className="home-sidebar__recent-item"
                   type="button"
                   onClick={() => handleExamSelect(exam.exam_id)}
+                  whileHover={{ x: 4 }}
+                  whileTap={{ scale: 0.99 }}
                 >
-                  <span className="home-sidebar__recent-title">{exam.title || "Untitled exam"}</span>
+                  <span className="home-sidebar__recent-title">{exam.title || "Untitled study quest"}</span>
                   <span className="home-sidebar__recent-meta">{formatTimestamp(exam.updated_at)}</span>
-                </button>
+                </motion.button>
               </li>
             ))}
           </ul>
         ) : null}
       </section>
 
-      <div className="home-sidebar__spacer" />
-
       <div ref={accountRef} className="home-sidebar__account-wrap">
-        {isAccountMenuOpen ? (
-          <div className="home-sidebar__account-menu" role="menu" aria-label="Account options">
+        <AnimatePresence>
+          {isAccountMenuOpen ? (
+          <motion.div
+            className="home-sidebar__account-menu"
+            role="menu"
+            aria-label="Account options"
+            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.98 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+          >
             <Link className="home-sidebar__account-link" href="/profile" role="menuitem" onClick={onNavigate}>
-              Profile
+              Profile nook
             </Link>
             <Link className="home-sidebar__account-link" href="/settings" role="menuitem" onClick={onNavigate}>
-              Settings
+              Settings studio
             </Link>
-          </div>
-        ) : null}
+          </motion.div>
+          ) : null}
+        </AnimatePresence>
 
         <button
           className="home-sidebar__account-button"
@@ -134,9 +150,8 @@ export function ExamHistorySidebar({ className, onNewExam, onNavigate }: ExamHis
           onClick={() => setIsAccountMenuOpen((prev) => !prev)}
         >
           <span>Account</span>
-          <span aria-hidden="true">{isAccountMenuOpen ? "^" : "v"}</span>
         </button>
       </div>
-    </aside>
+    </motion.aside>
   );
 }

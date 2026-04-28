@@ -21,7 +21,7 @@ export function MagicSparklesBackground() {
       background: { color: "transparent" },
       particles: {
         number: {
-          value: 400,
+          value: 260,
           density: {
             enable: true,
             width: 1200,
@@ -29,13 +29,13 @@ export function MagicSparklesBackground() {
           },
         },
         color: {
-          value: ["#ffffff", "#d6f3ff", "#9cdfff", "#77d3ff"],
+          value: ["#ffffff", "#dbeafe", "#fde68a", "#fda4af", "#a7f3d0"],
         },
         shape: {
           type: "circle",
         },
         opacity: {
-          value: { min: 0.12, max: 0.68 },
+          value: { min: 0.14, max: 0.62 },
           animation: {
             enable: true,
             speed: 0.92,
@@ -57,7 +57,7 @@ export function MagicSparklesBackground() {
         move: {
           enable: true,
           direction: "top" as const,
-          speed: { min: 0.08, max: 0.34 },
+          speed: { min: 0.06, max: 0.28 },
           random: true,
           straight: false,
           outModes: { default: "out" as const },

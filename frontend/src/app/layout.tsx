@@ -18,8 +18,8 @@ const wixMadeforText = Wix_Madefor_Text({
 });
 
 export const metadata: Metadata = {
-  title: "FlashCards",
-  description: "Guest-first study workspace.",
+  title: "FlashCards - Bright Study Decks",
+  description: "Turn notes into lively, evidence-backed flashcards in a few graceful clicks.",
 };
 
 export default function RootLayout({ children }: Readonly<PropsWithChildren>) {

@@ -13,26 +13,26 @@ type RatingOption = {
 const RATING_OPTIONS: RatingOption[] = [
   {
     value: "i_knew_it",
-    title: "I knew it",
-    subtitle: "Felt easy",
+    title: "Nailed it",
+    subtitle: "Brain did a victory lap",
     tone: "green",
   },
   {
     value: "almost_knew",
-    title: "Almost knew",
-    subtitle: "Need a quick refresh",
+    title: "Nearly there",
+    subtitle: "One polished reminder, please",
     tone: "yellow",
   },
   {
     value: "learned_now",
-    title: "Learned now",
-    subtitle: "Just understood it",
+    title: "Just learned it",
+    subtitle: "Fresh knowledge, handle gently",
     tone: "blue",
   },
   {
     value: "dont_understand",
-    title: "Don't understand",
-    subtitle: "Need more support",
+    title: "Still mysterious",
+    subtitle: "Send reinforcements",
     tone: "red",
   },
 ];
@@ -50,7 +50,7 @@ export function RatingControls({
   isPending,
   onRate,
 }: RatingControlsProps) {
-  function renderBubble(option: RatingOption, isSelected: boolean) {
+  function renderBubble(option: RatingOption, isSelected: boolean, index: number) {
     const isDisabled = isSelected || !canRateCurrentCard || isPending;
     return (
       <motion.button
@@ -61,18 +61,23 @@ export function RatingControls({
         type="button"
         onClick={() => onRate(option.value)}
         disabled={isDisabled}
-        animate={isSelected ? { y: 0 } : { y: [0, -4, 0] }}
+        animate={
+          isSelected
+            ? { y: -2, scale: 1.02 }
+            : { y: [0, -5, 0], scale: [1, 1.025, 1] }
+        }
         transition={
           isSelected
             ? { duration: 0.2, ease: "easeOut" }
             : {
-                duration: 4,
+                duration: 4.8,
+                delay: index * 0.24,
                 repeat: Number.POSITIVE_INFINITY,
                 ease: "easeInOut",
               }
         }
-        whileHover={isSelected ? undefined : { y: -6 }}
-        whileTap={isSelected ? undefined : { y: -2 }}
+        whileHover={isSelected ? undefined : { y: -8, scale: 1.055 }}
+        whileTap={isSelected ? undefined : { y: -2, scale: 0.98 }}
       >
         <span className="rating-controls__bubble-title">{option.title}</span>
         <span className="rating-controls__bubble-subtitle">
@@ -90,11 +95,11 @@ export function RatingControls({
     <div
       className="rating-controls"
       role="group"
-      aria-label="Rate your answer confidence"
+      aria-label="Rate how confident you feel"
     >
       {selectedOption
-        ? renderBubble(selectedOption, true)
-        : RATING_OPTIONS.map((option) => renderBubble(option, false))}
+        ? renderBubble(selectedOption, true, 0)
+        : RATING_OPTIONS.map((option, index) => renderBubble(option, false, index))}
     </div>
   );
 }

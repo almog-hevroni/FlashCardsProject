@@ -13,7 +13,7 @@ const MAGIC_PHASES = [
     endMs: 5_000,
     startProgress: 0,
     endProgress: 15,
-    text: "Uploading files securely... 🔒",
+    text: "Uploading your files with velvet gloves...",
   },
   {
     key: "analyzing",
@@ -21,7 +21,7 @@ const MAGIC_PHASES = [
     endMs: 40_000,
     startProgress: 15,
     endProgress: 45,
-    text: "AI is analyzing your documents... 🧠",
+    text: "Reading the fine print so you do not have to...",
   },
   {
     key: "weaving",
@@ -29,7 +29,7 @@ const MAGIC_PHASES = [
     endMs: 105_000,
     startProgress: 45,
     endProgress: 85,
-    text: "Weaving the magic & generating questions... ✨",
+    text: "Turning ideas into questions with academic flair...",
   },
   {
     key: "final-touches",
@@ -37,7 +37,7 @@ const MAGIC_PHASES = [
     endMs: Number.POSITIVE_INFINITY,
     startProgress: 85,
     endProgress: 90,
-    text: "Almost there, applying final touches... 🪄",
+    text: "Almost there, polishing the deck until it sparkles...",
   },
 ] as const;
 

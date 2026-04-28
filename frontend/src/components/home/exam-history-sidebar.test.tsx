@@ -40,7 +40,7 @@ function renderSidebar() {
   const queryClient = new QueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <ExamHistorySidebar onNewExam={vi.fn()} />
+      <ExamHistorySidebar />
     </QueryClientProvider>,
   );
 }
@@ -56,7 +56,7 @@ describe("ExamHistorySidebar", () => {
     renderSidebar();
 
     await waitFor(() => {
-      expect(screen.getByText("No recent exams yet.")).toBeInTheDocument();
+      expect(screen.getByText("No decks yet. Your comeback arc starts with one upload.")).toBeInTheDocument();
     });
   });
 

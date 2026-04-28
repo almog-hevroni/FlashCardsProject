@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   assertActiveRateableCard,
@@ -197,17 +198,27 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
     : null;
 
   return (
-    <div className={`exam-workspace${isSidebarOpen ? " exam-workspace--sidebar-open" : ""}`}>
-      <main className="exam-workspace__main">
+    <motion.div
+      className={`exam-workspace${isSidebarOpen ? " exam-workspace--sidebar-open" : ""}`}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+    >
+      <motion.main
+        className="exam-workspace__main"
+        initial={{ opacity: 0, y: 18 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease: "easeOut" }}
+      >
         <div className="exam-workspace__header">
           <div className="exam-workspace__header-main">
             <h1 className="exam-workspace__title">
-              {examQuery.data?.title ?? (examQuery.isLoading ? "Loading exam..." : "Exam")}
+              {examQuery.data?.title ?? (examQuery.isLoading ? "Preparing your deck..." : "Study deck")}
             </h1>
           </div>
           <div className="exam-workspace__header-actions">
             <Link className="exam-workspace__history-link" href={`/exams/${examId}/history`}>
-              View exam history
+              Review the trail
             </Link>
           </div>
         </div>
@@ -250,7 +261,7 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
             isPreviousEnabled={isPreviousEnabled}
           />
         )}
-      </main>
+      </motion.main>
 
       <ProofsDialog
         isOpen={Boolean(proofsCard)}
@@ -265,6 +276,6 @@ export function ExamWorkspace({ examId }: ExamWorkspaceProps) {
         isOpen={isSidebarOpen}
         onToggle={() => setIsSidebarOpen((previous) => !previous)}
       />
-    </div>
+    </motion.div>
   );
 }
