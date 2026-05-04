@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -448,6 +449,7 @@ def _cluster_topic_embeddings(
     mcs = max(2, min(mcs, n))
     ms = int(hdbscan_min_samples or _pick_hdbscan_min_samples(mcs))
     ms = max(1, min(ms, n - 1))
+    hdbscan_reject_reason: Optional[str] = None
 
     if hdbscan is not None and algo in {"hdbscan", "auto"}:
         try:
@@ -479,6 +481,14 @@ def _cluster_topic_embeddings(
 
             labels = _assign_noise_to_nearest_cluster(Xn, labels)
             n_clusters = int(len(set(labels.tolist())))
+            min_reasonable_clusters = max(2, int(math.ceil(_pick_k(n) * 0.5)))
+            if n >= 16:
+                min_reasonable_clusters = max(3, min_reasonable_clusters)
+            if n_clusters < min_reasonable_clusters:
+                raise RuntimeError(
+                    f"HDBSCAN under-segmented chunks into {n_clusters} clusters; "
+                    f"minimum reasonable clusters is {min_reasonable_clusters}"
+                )
             return labels, {
                 "method": "hdbscan_embeddings",
                 "seed": int(seed),
@@ -489,19 +499,32 @@ def _cluster_topic_embeddings(
                 "n_clusters": n_clusters,
             }
         except Exception as exc:
-            # Fall through to threshold clustering and then kmeans safety net.
-            _ = exc
+            hdbscan_reject_reason = str(exc)
+
+    if hdbscan_reject_reason and "under-segmented" in hdbscan_reject_reason:
+        k = min(_pick_k(n), n)
+        labels = _kmeans_cluster(Xn, k=k, seed=seed)
+        return labels, {
+            "method": "kmeans_embeddings",
+            "k": int(k),
+            "seed": int(seed),
+            "fallback_reason": hdbscan_reject_reason,
+        }
 
     # First fallback: non-fixed-k thresholded single-link clustering.
     try:
         labels = _agglomerative_single_link_threshold(Xn, threshold=float(agglomerative_threshold))
         n_clusters = int(len(set(labels.tolist())))
-        if n_clusters >= 2:
+        max_reasonable_clusters = max(3, int(math.ceil(_pick_k(n) * 1.5)))
+        singleton_count = sum(1 for cid in set(labels.tolist()) if int(np.sum(labels == cid)) == 1)
+        singleton_ratio = float(singleton_count / max(1, n_clusters))
+        if n_clusters >= 2 and n_clusters <= max_reasonable_clusters and singleton_ratio <= 0.4:
             return labels, {
                 "method": "agglomerative_cosine_threshold",
                 "seed": int(seed),
                 "agglomerative_threshold": float(agglomerative_threshold),
                 "n_clusters": n_clusters,
+                "singleton_ratio": singleton_ratio,
             }
     except Exception as exc:
         _ = exc
@@ -509,7 +532,12 @@ def _cluster_topic_embeddings(
     # Final fallback: legacy cosine-kmeans.
     k = min(_pick_k(n), n)
     labels = _kmeans_cluster(Xn, k=k, seed=seed)
-    return labels, {"method": "kmeans_embeddings", "k": int(k), "seed": int(seed)}
+    return labels, {
+        "method": "kmeans_embeddings",
+        "k": int(k),
+        "seed": int(seed),
+        "fallback_reason": hdbscan_reject_reason,
+    }
 
 
 def _merge_clusters_by_centroid(
@@ -593,6 +621,59 @@ def _merge_clusters_by_centroid(
     return kept
 
 
+def _attach_small_clusters_to_nearest(
+    *,
+    clusters: List[Dict[str, Any]],
+    Xn: np.ndarray,
+    id_to_row: Dict[str, int],
+    min_topic_chunks: int = 2,
+) -> List[Dict[str, Any]]:
+    if not clusters:
+        return []
+
+    threshold = max(1, int(min_topic_chunks))
+    large = [it for it in clusters if len(it.get("chunk_ids", [])) >= threshold]
+    small = [it for it in clusters if len(it.get("chunk_ids", [])) < threshold]
+    if not small or not large:
+        return clusters
+
+    kept = list(large)
+    for it in small:
+        c = it.get("centroid")
+        if c is None:
+            continue
+        best_j = 0
+        best_sim = -1.0
+        for j, target in enumerate(kept):
+            sim = float(np.dot(c, target["centroid"]))
+            if sim > best_sim:
+                best_sim = sim
+                best_j = j
+
+        target = kept[best_j]
+        target["cluster_ids"].extend(it.get("cluster_ids", []))
+        target["chunk_ids"].extend(it.get("chunk_ids", []))
+        target["merged"] = True
+
+        rows = [id_to_row[cid] for cid in target["chunk_ids"] if cid in id_to_row]
+        if rows:
+            V = Xn[rows]
+            target["centroid"] = l2_normalize(np.mean(V, axis=0, keepdims=True))[0]
+
+    for it in kept:
+        seen = set()
+        deduped = []
+        for cid in it["chunk_ids"]:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            deduped.append(cid)
+        it["chunk_ids"] = deduped
+
+    kept.sort(key=lambda it: len(it["chunk_ids"]), reverse=True)
+    return kept
+
+
 def build_topics_for_exam(
     *,
     exam_id: str,
@@ -670,6 +751,12 @@ def build_topics_for_exam(
         Xn=Xn,
         id_to_row=id_to_row,
         threshold=merge_threshold,
+    )
+    merged_clusters = _attach_small_clusters_to_nearest(
+        clusters=merged_clusters,
+        Xn=Xn,
+        id_to_row=id_to_row,
+        min_topic_chunks=2,
     )
 
     built: List[BuiltTopic] = []
